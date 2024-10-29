@@ -1884,7 +1884,7 @@ int vb2_core_dqbuf(struct vb2_queue *q, unsigned int *pindex, void *pb,
 
 	switch (vb->state) {
 	case VB2_BUF_STATE_DONE:
-		dprintk(q, 3, "returning done buffer\n");
+		dprintk(q, 3, "returning done buffer type %d\n", vb->type);
 		break;
 	case VB2_BUF_STATE_ERROR:
 		dprintk(q, 3, "returning done buffer with errors\n");
@@ -1922,8 +1922,8 @@ int vb2_core_dqbuf(struct vb2_queue *q, unsigned int *pindex, void *pb,
 		media_request_put(vb->request);
 	vb->request = NULL;
 
-	dprintk(q, 2, "dqbuf of buffer %d, state: %s\n",
-		vb->index, vb2_state_name(vb->state));
+	dprintk(q, 2, "dqbuf of buffer %d, state: %s type: %d\n",
+		vb->index, vb2_state_name(vb->state), vb->type);
 
 	return 0;
 
