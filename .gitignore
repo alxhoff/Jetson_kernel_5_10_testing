@@ -224,3 +224,8 @@ scripts/module.lds
 security/selinux/av_permissions.h
 security/selinux/flask.h
 
+arch/arm64/crypto/sha256-core.S
+arch/arm64/crypto/sha512-core.S
+arch/arm64/kernel/vdso/vdso.lds
+arch/arm64/kernel/vmlinux.lds
+arch/arm64/kvm/hyp/nvhe/hyp.lds
