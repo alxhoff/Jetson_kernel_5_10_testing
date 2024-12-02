@@ -29,10 +29,10 @@
 #include <asm/page.h>
 
 #define EFI_SUCCESS		0
-#define EFI_LOAD_ERROR          ( 1 | (1UL << (BITS_PER_LONG-1)))
+#define EFI_LOAD_ERROR		( 1 | (1UL << (BITS_PER_LONG-1)))
 #define EFI_INVALID_PARAMETER	( 2 | (1UL << (BITS_PER_LONG-1)))
 #define EFI_UNSUPPORTED		( 3 | (1UL << (BITS_PER_LONG-1)))
-#define EFI_BAD_BUFFER_SIZE     ( 4 | (1UL << (BITS_PER_LONG-1)))
+#define EFI_BAD_BUFFER_SIZE	( 4 | (1UL << (BITS_PER_LONG-1)))
 #define EFI_BUFFER_TOO_SMALL	( 5 | (1UL << (BITS_PER_LONG-1)))
 #define EFI_NOT_READY		( 6 | (1UL << (BITS_PER_LONG-1)))
 #define EFI_DEVICE_ERROR	( 7 | (1UL << (BITS_PER_LONG-1)))
@@ -42,6 +42,8 @@
 #define EFI_TIMEOUT		(18 | (1UL << (BITS_PER_LONG-1)))
 #define EFI_ABORTED		(21 | (1UL << (BITS_PER_LONG-1)))
 #define EFI_SECURITY_VIOLATION	(26 | (1UL << (BITS_PER_LONG-1)))
+
+#define EFI_IS_ERROR(x)		((x) & (1UL << (BITS_PER_LONG-1)))
 
 typedef unsigned long efi_status_t;
 typedef u8 efi_bool_t;
@@ -167,9 +169,9 @@ struct capsule_info {
 	size_t			page_bytes_remain;
 };
 
+int efi_capsule_setup_info(struct capsule_info *cap_info, void *kbuff,
+                           size_t hdr_bytes);
 int __efi_capsule_setup_info(struct capsule_info *cap_info);
-
-typedef int (*efi_freemem_callback_t) (u64 start, u64 end, void *arg);
 
 /*
  * Types and defines for Time Services
@@ -607,10 +609,6 @@ efi_guid_to_str(efi_guid_t *guid, char *out)
 }
 
 extern void efi_init (void);
-extern void *efi_get_pal_addr (void);
-extern void efi_map_pal_code (void);
-extern void efi_memmap_walk (efi_freemem_callback_t callback, void *arg);
-extern void efi_gettimeofday (struct timespec64 *ts);
 #ifdef CONFIG_EFI
 extern void efi_enter_virtual_mode (void);	/* switch EFI to virtual mode, if possible */
 #else
@@ -788,6 +786,23 @@ extern int __init efi_setup_pcdp_console(char *);
 #define EFI_MEM_ATTR		10	/* Did firmware publish an EFI_MEMORY_ATTRIBUTES table? */
 #define EFI_MEM_NO_SOFT_RESERVE	11	/* Is the kernel configured to ignore soft reservations? */
 #define EFI_PRESERVE_BS_REGIONS	12	/* Are EFI boot-services memory segments available? */
+#define EFI_SECURE_BOOT		13	/* Are we in Secure Boot mode? */
+
+enum efi_secureboot_mode {
+	efi_secureboot_mode_unset,
+	efi_secureboot_mode_unknown,
+	efi_secureboot_mode_disabled,
+	efi_secureboot_mode_enabled,
+};
+
+#ifdef CONFIG_EFI_PARAMS_FROM_FDT
+u32 __init efi_get__secure_boot(void);
+#else
+static inline u32 efi_get__secure_boot(void)
+{
+	return efi_secureboot_mode_unset;
+};
+#endif
 
 #ifdef CONFIG_EFI
 /*
@@ -798,6 +813,8 @@ static inline bool efi_enabled(int feature)
 	return test_bit(feature, &efi.flags) != 0;
 }
 extern void efi_reboot(enum reboot_mode reboot_mode, const char *__unused);
+
+extern void __init efi_set_secure_boot(enum efi_secureboot_mode mode);
 
 bool __pure __efi_soft_reserve_enabled(void);
 
@@ -819,11 +836,7 @@ static inline bool efi_enabled(int feature)
 static inline void
 efi_reboot(enum reboot_mode reboot_mode, const char *__unused) {}
 
-static inline bool
-efi_capsule_pending(int *reset_type)
-{
-	return false;
-}
+static inline void efi_set_secure_boot(enum efi_secureboot_mode mode) {}
 
 static inline bool efi_soft_reserve_enabled(void)
 {
@@ -837,6 +850,7 @@ static inline bool efi_rt_services_supported(unsigned int mask)
 #endif
 
 extern int efi_status_to_err(efi_status_t status);
+extern const char *efi_status_to_str(efi_status_t status);
 
 /*
  * Variable Attributes
@@ -1040,6 +1054,7 @@ bool efivar_validate(efi_guid_t vendor, efi_char16_t *var_name, u8 *data,
 bool efivar_variable_is_removable(efi_guid_t vendor, const char *name,
 				  size_t len);
 
+#if IS_ENABLED(CONFIG_EFI_CAPSULE_LOADER)
 extern bool efi_capsule_pending(int *reset_type);
 
 extern int efi_capsule_supported(efi_guid_t guid, u32 flags,
@@ -1047,6 +1062,9 @@ extern int efi_capsule_supported(efi_guid_t guid, u32 flags,
 
 extern int efi_capsule_update(efi_capsule_header_t *capsule,
 			      phys_addr_t *pages);
+#else
+static inline bool efi_capsule_pending(int *reset_type) { return false; }
+#endif
 
 #ifdef CONFIG_EFI_RUNTIME_MAP
 int efi_runtime_map_init(struct kobject *);
@@ -1085,30 +1103,33 @@ static inline bool efi_runtime_disabled(void) { return true; }
 extern void efi_call_virt_check_flags(unsigned long flags, const char *call);
 extern unsigned long efi_call_virt_save_flags(void);
 
-enum efi_secureboot_mode {
-	efi_secureboot_mode_unset,
-	efi_secureboot_mode_unknown,
-	efi_secureboot_mode_disabled,
-	efi_secureboot_mode_enabled,
-};
-enum efi_secureboot_mode efi_get_secureboot(void);
+static inline
+enum efi_secureboot_mode efi_get_secureboot_mode(efi_get_variable_t *get_var)
+{
+	u8 secboot, setupmode = 0;
+	efi_status_t status;
+	unsigned long size;
 
-#ifdef CONFIG_RESET_ATTACK_MITIGATION
-void efi_enable_reset_attack_mitigation(void);
-#else
-static inline void
-efi_enable_reset_attack_mitigation(void) { }
-#endif
+	size = sizeof(secboot);
+	status = get_var(L"SecureBoot", &EFI_GLOBAL_VARIABLE_GUID, NULL, &size,
+			 &secboot);
+	if (status == EFI_NOT_FOUND)
+		return efi_secureboot_mode_disabled;
+	if (status != EFI_SUCCESS)
+		return efi_secureboot_mode_unknown;
+
+	size = sizeof(setupmode);
+	get_var(L"SetupMode", &EFI_GLOBAL_VARIABLE_GUID, NULL, &size, &setupmode);
+	if (secboot == 0 || setupmode == 1)
+		return efi_secureboot_mode_disabled;
+	return efi_secureboot_mode_enabled;
+}
 
 #ifdef CONFIG_EFI_EMBEDDED_FIRMWARE
 void efi_check_for_embedded_firmwares(void);
 #else
 static inline void efi_check_for_embedded_firmwares(void) { }
 #endif
-
-efi_status_t efi_random_get_seed(void);
-
-void efi_retrieve_tpm2_eventlog(void);
 
 /*
  * Arch code can implement the following three template macros, avoiding
@@ -1159,7 +1180,7 @@ void efi_retrieve_tpm2_eventlog(void);
 	arch_efi_call_virt_teardown();					\
 })
 
-#define EFI_RANDOM_SEED_SIZE		64U
+#define EFI_RANDOM_SEED_SIZE		32U // BLAKE2S_HASH_SIZE
 
 struct linux_efi_random_seed {
 	u32	size;
@@ -1276,6 +1297,12 @@ static inline struct efi_mokvar_table_entry *efi_mokvar_entry_find(
 {
 	return NULL;
 }
+#endif
+
+#ifdef CONFIG_SYSFB
+extern void efifb_setup_from_dmi(struct screen_info *si, const char *opt);
+#else
+static inline void efifb_setup_from_dmi(struct screen_info *si, const char *opt) { }
 #endif
 
 #endif /* _LINUX_EFI_H */

@@ -4,7 +4,7 @@
  *
  *  Copyright (C) 2003 Russell King, All Rights Reserved.
  *  Copyright (C) 2007 Pierre Ossman
- *  Copyright (c) 2018-2020, NVIDIA CORPORATION.  All rights reserved.
+ *  Copyright (c) 2018-2023, NVIDIA CORPORATION.  All rights reserved.
  *
  *  MMC card bus driver model
  */
@@ -159,7 +159,7 @@ static int mmc_bus_probe(struct device *dev)
 	return drv->probe(card);
 }
 
-static int mmc_bus_remove(struct device *dev)
+static void mmc_bus_remove(struct device *dev)
 {
 	struct mmc_driver *drv = to_mmc_driver(dev->driver);
 	struct mmc_card *card = mmc_dev_to_card(dev);
@@ -174,8 +174,6 @@ static int mmc_bus_remove(struct device *dev)
 	mmc_cards[card_id] = NULL;
 	card_idx--;
 	drv->remove(card);
-
-	return 0;
 }
 
 static void mmc_bus_shutdown(struct device *dev)
@@ -222,7 +220,7 @@ static int mmc_bus_resume(struct device *dev)
 
 	ret = host->bus_ops->resume(host);
 	if (ret)
-		pr_info("%s: error %d during resume (card was removed?)\n",
+		pr_warn("%s: error %d during resume (card was removed?)\n",
 			mmc_hostname(host), ret);
 
 	ret = pm_generic_resume(dev);

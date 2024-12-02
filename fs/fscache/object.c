@@ -77,7 +77,6 @@ static WORK_STATE(INIT_OBJECT,		"INIT", fscache_initialise_object);
 static WORK_STATE(PARENT_READY,		"PRDY", fscache_parent_ready);
 static WORK_STATE(ABORT_INIT,		"ABRT", fscache_abort_initialisation);
 static WORK_STATE(LOOK_UP_OBJECT,	"LOOK", fscache_look_up_object);
-static WORK_STATE(CREATE_OBJECT,	"CRTO", fscache_look_up_object);
 static WORK_STATE(OBJECT_AVAILABLE,	"AVBL", fscache_object_available);
 static WORK_STATE(JUMPSTART_DEPS,	"JUMP", fscache_jumpstart_dependents);
 
@@ -277,13 +276,10 @@ static void fscache_object_work_func(struct work_struct *work)
 {
 	struct fscache_object *object =
 		container_of(work, struct fscache_object, work);
-	unsigned long start;
 
 	_enter("{OBJ%x}", object->debug_id);
 
-	start = jiffies;
 	fscache_object_sm_dispatcher(object);
-	fscache_hist(fscache_objs_histogram, start);
 	fscache_put_object(object, fscache_obj_put_work);
 }
 
@@ -436,7 +432,6 @@ static const struct fscache_state *fscache_parent_ready(struct fscache_object *o
 	spin_lock(&parent->lock);
 	parent->n_ops++;
 	parent->n_obj_ops++;
-	object->lookup_jif = jiffies;
 	spin_unlock(&parent->lock);
 
 	_leave("");
@@ -522,7 +517,6 @@ void fscache_object_lookup_negative(struct fscache_object *object)
 		set_bit(FSCACHE_COOKIE_NO_DATA_YET, &cookie->flags);
 		clear_bit(FSCACHE_COOKIE_UNAVAILABLE, &cookie->flags);
 
-		_debug("wake up lookup %p", &cookie->flags);
 		clear_bit_unlock(FSCACHE_COOKIE_LOOKING_UP, &cookie->flags);
 		wake_up_bit(&cookie->flags, FSCACHE_COOKIE_LOOKING_UP);
 	}
@@ -596,7 +590,6 @@ static const struct fscache_state *fscache_object_available(struct fscache_objec
 	object->cache->ops->lookup_complete(object);
 	fscache_stat_d(&fscache_n_cop_lookup_complete);
 
-	fscache_hist(fscache_obj_instantiate_histogram, object->lookup_jif);
 	fscache_stat(&fscache_n_object_avail);
 
 	_leave("");
@@ -799,13 +792,13 @@ static void fscache_put_object(struct fscache_object *object,
  */
 void fscache_object_destroy(struct fscache_object *object)
 {
-	fscache_objlist_remove(object);
-
 	/* We can get rid of the cookie now */
 	fscache_cookie_put(object->cookie, fscache_cookie_put_object);
 	object->cookie = NULL;
 }
 EXPORT_SYMBOL(fscache_object_destroy);
+
+static DECLARE_WAIT_QUEUE_HEAD(fscache_object_cong_wait);
 
 /*
  * enqueue an object for metadata-type processing
@@ -815,16 +808,12 @@ void fscache_enqueue_object(struct fscache_object *object)
 	_enter("{OBJ%x}", object->debug_id);
 
 	if (fscache_get_object(object, fscache_obj_get_queue) >= 0) {
-		wait_queue_head_t *cong_wq =
-			&get_cpu_var(fscache_object_cong_wait);
 
 		if (queue_work(fscache_object_wq, &object->work)) {
 			if (fscache_object_congested())
-				wake_up(cong_wq);
+				wake_up(&fscache_object_cong_wait);
 		} else
 			fscache_put_object(object, fscache_obj_put_queue);
-
-		put_cpu_var(fscache_object_cong_wait);
 	}
 }
 
@@ -842,16 +831,15 @@ void fscache_enqueue_object(struct fscache_object *object)
  */
 bool fscache_object_sleep_till_congested(signed long *timeoutp)
 {
-	wait_queue_head_t *cong_wq = this_cpu_ptr(&fscache_object_cong_wait);
 	DEFINE_WAIT(wait);
 
 	if (fscache_object_congested())
 		return true;
 
-	add_wait_queue_exclusive(cong_wq, &wait);
+	add_wait_queue_exclusive(&fscache_object_cong_wait, &wait);
 	if (!fscache_object_congested())
 		*timeoutp = schedule_timeout(*timeoutp);
-	finish_wait(cong_wq, &wait);
+	finish_wait(&fscache_object_cong_wait, &wait);
 
 	return fscache_object_congested();
 }
@@ -915,6 +903,7 @@ static void fscache_dequeue_object(struct fscache_object *object)
  * @object: The object to ask about
  * @data: The auxiliary data for the object
  * @datalen: The size of the auxiliary data
+ * @object_size: The size of the object according to the server.
  *
  * This function consults the netfs about the coherency state of an object.
  * The caller must be holding a ref on cookie->n_active (held by

@@ -8,7 +8,7 @@
 #ifndef __SOUND_HDA_CODEC_H
 #define __SOUND_HDA_CODEC_H
 
-#include <linux/kref.h>
+#include <linux/refcount.h>
 #include <linux/mod_devicetable.h>
 #include <sound/info.h>
 #include <sound/control.h>
@@ -62,7 +62,6 @@ struct hda_bus {
 	unsigned int jackpoll_in_suspend:1; /* keep jack polling during
 					     * runtime suspend
 					     */
-
 
 	int primary_dig_out_type;	/* primary digital out PCM type */
 	unsigned int mixer_assigned;	/* codec addr for mixer name */
@@ -118,7 +117,6 @@ struct hda_codec_ops {
 	int (*resume)(struct hda_codec *codec);
 	int (*check_power_status)(struct hda_codec *codec, hda_nid_t nid);
 #endif
-	void (*reboot_notify)(struct hda_codec *codec);
 	void (*stream_pm)(struct hda_codec *codec, hda_nid_t nid, bool on);
 };
 
@@ -171,8 +169,8 @@ struct hda_pcm {
 	bool own_chmap;		/* codec driver provides own channel maps */
 	/* private: */
 	struct hda_codec *codec;
-	struct kref kref;
 	struct list_head list;
+	unsigned int disconnected:1;
 };
 
 /* codec information */
@@ -192,6 +190,8 @@ struct hda_codec {
 
 	/* PCM to create, set by patch_ops.build_pcms callback */
 	struct list_head pcm_list_head;
+	refcount_t pcm_ref;
+	wait_queue_head_t remove_sleep;
 
 	/* codec specific info */
 	void *spec;
@@ -243,10 +243,6 @@ struct hda_codec {
 	unsigned int single_adc_amp:1; /* adc in-amp takes no index
 					* (e.g. CX20549 codec)
 					*/
-	unsigned int hdmi_intr_trig_ctrl:1; /* hdmi interrupt trigger
-					     * control bit
-					     * (e.g. Nvidia codecs)
-					     */
 	unsigned int no_sticky_stream:1; /* no sticky-PCM stream assignment */
 	unsigned int pins_shutup:1;	/* pins are shut up */
 	unsigned int no_trigger_sense:1; /* don't trigger at pin-sensing */
@@ -353,7 +349,7 @@ snd_hda_get_num_conns(struct hda_codec *codec, hda_nid_t nid)
 #define snd_hda_get_raw_connections(codec, nid, list, max_conns) \
 	snd_hdac_get_connections(&(codec)->core, nid, list, max_conns)
 #define snd_hda_get_num_raw_conns(codec, nid) \
-	snd_hdac_get_connections(&(codec)->core, nid, NULL, 0);
+	snd_hdac_get_connections(&(codec)->core, nid, NULL, 0)
 
 int snd_hda_get_conn_list(struct hda_codec *codec, hda_nid_t nid,
 			  const hda_nid_t **listp);
@@ -429,7 +425,7 @@ void snd_hda_codec_cleanup_for_unbind(struct hda_codec *codec);
 
 static inline void snd_hda_codec_pcm_get(struct hda_pcm *pcm)
 {
-	kref_get(&pcm->kref);
+	refcount_inc(&pcm->codec->pcm_ref);
 }
 void snd_hda_codec_pcm_put(struct hda_pcm *pcm);
 

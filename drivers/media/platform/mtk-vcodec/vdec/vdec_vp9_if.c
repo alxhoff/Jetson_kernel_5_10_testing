@@ -61,7 +61,7 @@ struct vp9_ref_cnt_buf {
 };
 
 /**
- * struct vp9_fb_info - contains current frame's reference buffer information
+ * struct vp9_ref_buf - contains current frame's reference buffer information
  * @buf : reference buffer
  * @idx : reference buffer index to frm_bufs
  * @reserved : reserved field used by vpu
@@ -73,7 +73,7 @@ struct vp9_ref_buf {
 };
 
 /**
- * struct vp9_fb_info - contains frame buffer info
+ * struct vp9_sf_ref_fb - contains frame buffer info
  * @fb : super frame reference frame buffer
  * @used : this reference frame info entry is used
  * @padding : for 64 bytes size align
@@ -226,10 +226,11 @@ static struct vdec_fb *vp9_rm_from_fb_use_list(struct vdec_vp9_inst
 		if (fb->base_y.va == addr) {
 			list_move_tail(&node->list,
 				       &inst->available_fb_node_list);
-			break;
+			return fb;
 		}
 	}
-	return fb;
+
+	return NULL;
 }
 
 static void vp9_add_to_fb_free_list(struct vdec_vp9_inst *inst,

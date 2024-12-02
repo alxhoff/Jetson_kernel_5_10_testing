@@ -404,9 +404,9 @@ static struct snd_soc_dai_driver mt6660_codec_dai = {
 		.formats = STUB_FORMATS,
 	},
 	/* dai properties */
-	.symmetric_rates = 1,
+	.symmetric_rate = 1,
 	.symmetric_channels = 1,
-	.symmetric_samplebits = 1,
+	.symmetric_sample_bits = 1,
 	/* dai operations */
 	.ops = &mt6660_component_aif_ops,
 };
@@ -510,7 +510,11 @@ static int mt6660_i2c_probe(struct i2c_client *client,
 	ret = devm_snd_soc_register_component(chip->dev,
 					       &mt6660_component_driver,
 					       &mt6660_codec_dai, 1);
+	if (ret)
+		pm_runtime_disable(chip->dev);
+
 	return ret;
+
 probe_fail:
 	_mt6660_chip_power_on(chip, 0);
 	mutex_destroy(&chip->io_lock);

@@ -31,6 +31,7 @@
 #include <linux/io.h>
 #include <linux/uaccess.h>
 #include <linux/atomic.h>
+#include <linux/suspend.h>
 #include <net/netlink.h>
 #include <net/genetlink.h>
 #include <net/sock.h>
@@ -54,6 +55,18 @@ static const char *phy_state_to_str(enum phy_state st)
 	}
 
 	return NULL;
+}
+
+static void phy_process_state_change(struct phy_device *phydev,
+				     enum phy_state old_state)
+{
+	if (old_state != phydev->state) {
+		phydev_dbg(phydev, "PHY state change %s -> %s\n",
+			   phy_state_to_str(old_state),
+			   phy_state_to_str(phydev->state));
+		if (phydev->drv && phydev->drv->link_change_notify)
+			phydev->drv->link_change_notify(phydev);
+	}
 }
 
 static void phy_link_up(struct phy_device *phydev)
@@ -112,28 +125,6 @@ void phy_print_status(struct phy_device *phydev)
 	}
 }
 EXPORT_SYMBOL(phy_print_status);
-
-/**
- * phy_clear_interrupt - Ack the phy device's interrupt
- * @phydev: the phy_device struct
- *
- * If the @phydev driver has an ack_interrupt function, call it to
- * ack and clear the phy device's interrupt.
- *
- * Returns 0 on success or < 0 on error.
- */
-static int phy_clear_interrupt(struct phy_device *phydev)
-{
-	int ret = 0;
-
-	if (phydev->drv->ack_interrupt) {
-		mutex_lock(&phydev->lock);
-		ret = phydev->drv->ack_interrupt(phydev);
-		mutex_unlock(&phydev->lock);
-	}
-
-	return ret;
-}
 
 /**
  * phy_config_interrupt - configure the PHY device for the requested interrupts
@@ -351,8 +342,7 @@ int phy_mii_ioctl(struct phy_device *phydev, struct ifreq *ifr, int cmd)
 					else if (val & BMCR_SPEED100)
 						phydev->speed = SPEED_100;
 					else phydev->speed = SPEED_10;
-				}
-				else {
+				} else {
 					if (phydev->autoneg == AUTONEG_DISABLE)
 						change_autoneg = true;
 					phydev->autoneg = AUTONEG_ENABLE;
@@ -398,7 +388,7 @@ int phy_mii_ioctl(struct phy_device *phydev, struct ifreq *ifr, int cmd)
 EXPORT_SYMBOL(phy_mii_ioctl);
 
 /**
- * phy_do_ioctl - generic ndo_do_ioctl implementation
+ * phy_do_ioctl - generic ndo_eth_ioctl implementation
  * @dev: the net_device struct
  * @ifr: &struct ifreq for socket ioctl's
  * @cmd: ioctl cmd to execute
@@ -413,7 +403,7 @@ int phy_do_ioctl(struct net_device *dev, struct ifreq *ifr, int cmd)
 EXPORT_SYMBOL(phy_do_ioctl);
 
 /**
- * phy_do_ioctl_running - generic ndo_do_ioctl implementation but test first
+ * phy_do_ioctl_running - generic ndo_eth_ioctl implementation but test first
  *
  * @dev: the net_device struct
  * @ifr: &struct ifreq for socket ioctl's
@@ -445,14 +435,15 @@ void phy_queue_state_machine(struct phy_device *phydev, unsigned long jiffies)
 EXPORT_SYMBOL(phy_queue_state_machine);
 
 /**
- * phy_queue_state_machine - Trigger the state machine to run now
+ * phy_trigger_machine - Trigger the state machine to run now
  *
  * @phydev: the phy_device struct
  */
-static void phy_trigger_machine(struct phy_device *phydev)
+void phy_trigger_machine(struct phy_device *phydev)
 {
 	phy_queue_state_machine(phydev, 0);
 }
+EXPORT_SYMBOL(phy_trigger_machine);
 
 static void phy_abort_cable_test(struct phy_device *phydev)
 {
@@ -671,7 +662,7 @@ out:
 }
 EXPORT_SYMBOL(phy_start_cable_test_tdr);
 
-static int phy_config_aneg(struct phy_device *phydev)
+int phy_config_aneg(struct phy_device *phydev)
 {
 	if (phydev->drv->config_aneg)
 		return phydev->drv->config_aneg(phydev);
@@ -684,6 +675,7 @@ static int phy_config_aneg(struct phy_device *phydev)
 
 	return genphy_config_aneg(phydev);
 }
+EXPORT_SYMBOL(phy_config_aneg);
 
 /**
  * phy_check_link_status - check link status and set state accordingly
@@ -696,7 +688,7 @@ static int phy_check_link_status(struct phy_device *phydev)
 {
 	int err;
 
-	WARN_ON(!mutex_is_locked(&phydev->lock));
+	lockdep_assert_held(&phydev->lock);
 
 	/* Keep previous state if loopback is enabled because some PHYs
 	 * report that Link is Down when loopback is enabled.
@@ -958,7 +950,7 @@ void phy_stop_machine(struct phy_device *phydev)
  * Must not be called from interrupt context, or while the
  * phydev->lock is held.
  */
-static void phy_error(struct phy_device *phydev)
+void phy_error(struct phy_device *phydev)
 {
 	WARN_ON(1);
 
@@ -968,6 +960,7 @@ static void phy_error(struct phy_device *phydev)
 
 	phy_trigger_machine(phydev);
 }
+EXPORT_SYMBOL(phy_error);
 
 /**
  * phy_disable_interrupts - Disable the PHY interrupts from the PHY side
@@ -975,45 +968,8 @@ static void phy_error(struct phy_device *phydev)
  */
 int phy_disable_interrupts(struct phy_device *phydev)
 {
-	int err;
-
 	/* Disable PHY interrupts */
-	err = phy_config_interrupt(phydev, PHY_INTERRUPT_DISABLED);
-	if (err)
-		return err;
-
-	/* Clear the interrupt */
-	return phy_clear_interrupt(phydev);
-}
-
-/**
- * phy_did_interrupt - Checks if the PHY generated an interrupt
- * @phydev: target phy_device struct
- */
-static int phy_did_interrupt(struct phy_device *phydev)
-{
-	int ret;
-
-	mutex_lock(&phydev->lock);
-	ret = phydev->drv->did_interrupt(phydev);
-	mutex_unlock(&phydev->lock);
-
-	return ret;
-}
-
-/**
- * phy_handle_interrupt - Handle PHY interrupt
- * @phydev: target phy_device struct
- */
-static irqreturn_t phy_handle_interrupt(struct phy_device *phydev)
-{
-	irqreturn_t ret;
-
-	mutex_lock(&phydev->lock);
-	ret = phydev->drv->handle_interrupt(phydev);
-	mutex_unlock(&phydev->lock);
-
-	return ret;
+	return phy_config_interrupt(phydev, PHY_INTERRUPT_DISABLED);
 }
 
 /**
@@ -1027,23 +983,35 @@ static irqreturn_t phy_interrupt(int irq, void *phy_dat)
 {
 	struct phy_device *phydev = phy_dat;
 	struct phy_driver *drv = phydev->drv;
+	irqreturn_t ret;
 
-	if (drv->handle_interrupt)
-		return phy_handle_interrupt(phydev);
+	/* Wakeup interrupts may occur during a system sleep transition.
+	 * Postpone handling until the PHY has resumed.
+	 */
+	if (IS_ENABLED(CONFIG_PM_SLEEP) && phydev->irq_suspended) {
+		struct net_device *netdev = phydev->attached_dev;
 
-	if (drv->did_interrupt && !phy_did_interrupt(phydev))
-		return IRQ_NONE;
+		if (netdev) {
+			struct device *parent = netdev->dev.parent;
 
-	/* reschedule state queue work to run as soon as possible */
-	phy_trigger_machine(phydev);
+			if (netdev->wol_enabled)
+				pm_system_wakeup();
+			else if (device_may_wakeup(&netdev->dev))
+				pm_wakeup_dev_event(&netdev->dev, 0, true);
+			else if (parent && device_may_wakeup(parent))
+				pm_wakeup_dev_event(parent, 0, true);
+		}
 
-	/* did_interrupt() may have cleared the interrupt already */
-	if (!drv->did_interrupt && phy_clear_interrupt(phydev)) {
-		phy_error(phydev);
-		return IRQ_NONE;
+		phydev->irq_rerun = 1;
+		disable_irq_nosync(irq);
+		return IRQ_HANDLED;
 	}
 
-	return IRQ_HANDLED;
+	mutex_lock(&phydev->lock);
+	ret = drv->handle_interrupt(phydev);
+	mutex_unlock(&phydev->lock);
+
+	return ret;
 }
 
 /**
@@ -1052,11 +1020,6 @@ static irqreturn_t phy_interrupt(int irq, void *phy_dat)
  */
 static int phy_enable_interrupts(struct phy_device *phydev)
 {
-	int err = phy_clear_interrupt(phydev);
-
-	if (err < 0)
-		return err;
-
 	return phy_config_interrupt(phydev, PHY_INTERRUPT_ENABLED);
 }
 
@@ -1110,6 +1073,7 @@ EXPORT_SYMBOL(phy_free_interrupt);
 void phy_stop(struct phy_device *phydev)
 {
 	struct net_device *dev = phydev->attached_dev;
+	enum phy_state old_state;
 
 	if (!phy_is_started(phydev) && phydev->state != PHY_DOWN) {
 		WARN(1, "called from state %s\n",
@@ -1118,6 +1082,7 @@ void phy_stop(struct phy_device *phydev)
 	}
 
 	mutex_lock(&phydev->lock);
+	old_state = phydev->state;
 
 	if (phydev->state == PHY_CABLETEST) {
 		phy_abort_cable_test(phydev);
@@ -1128,6 +1093,7 @@ void phy_stop(struct phy_device *phydev)
 		sfp_upstream_stop(phydev->sfp_bus);
 
 	phydev->state = PHY_HALTED;
+	phy_process_state_change(phydev, old_state);
 
 	mutex_unlock(&phydev->lock);
 
@@ -1239,19 +1205,16 @@ void phy_state_machine(struct work_struct *work)
 	else if (do_suspend)
 		phy_suspend(phydev);
 
+	if (err == -ENODEV)
+		return;
+
 	if (err < 0)
 		phy_error(phydev);
 
-	if (old_state != phydev->state) {
-		phydev_dbg(phydev, "PHY state change %s -> %s\n",
-			   phy_state_to_str(old_state),
-			   phy_state_to_str(phydev->state));
-		if (phydev->drv && phydev->drv->link_change_notify)
-			phydev->drv->link_change_notify(phydev);
-	}
+	phy_process_state_change(phydev, old_state);
 
 	/* Only re-schedule a PHY state machine change if we are polling the
-	 * PHY, if PHY_IGNORE_INTERRUPT is set, then we will be moving
+	 * PHY, if PHY_MAC_INTERRUPT is set, then we will be moving
 	 * between states from phy_mac_interrupt().
 	 *
 	 * In state PHY_HALTED the PHY gets suspended, so rescheduling the

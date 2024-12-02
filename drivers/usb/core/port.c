@@ -2,7 +2,6 @@
 /*
  * usb port device code
  *
- * Copyright (c) 2015-2018, NVIDIA CORPORATION.  All rights reserved.
  * Copyright (C) 2012 Intel Corp
  *
  * Author: Lan Tianyu <tianyu.lan@intel.com>
@@ -156,7 +155,7 @@ static struct attribute *port_dev_attrs[] = {
 	NULL,
 };
 
-static struct attribute_group port_dev_attr_grp = {
+static const struct attribute_group port_dev_attr_grp = {
 	.attrs = port_dev_attrs,
 };
 
@@ -170,7 +169,7 @@ static struct attribute *port_dev_usb3_attrs[] = {
 	NULL,
 };
 
-static struct attribute_group port_dev_usb3_attr_grp = {
+static const struct attribute_group port_dev_usb3_attr_grp = {
 	.attrs = port_dev_usb3_attrs,
 };
 
@@ -218,7 +217,7 @@ static int usb_port_runtime_resume(struct device *dev)
 	if (retval < 0)
 		return retval;
 
-	retval = usb_hub_set_port_power(hdev, hub, port1, true);
+	retval = usb_hub_set_port_power(hub, port1, true);
 	msleep(hub_power_on_good_delay(hub));
 	if (udev && !retval) {
 		/*
@@ -274,7 +273,7 @@ static int usb_port_runtime_suspend(struct device *dev)
 	if (retval < 0)
 		return retval;
 
-	retval = usb_hub_set_port_power(hdev, hub, port1, false);
+	retval = usb_hub_set_port_power(hub, port1, false);
 	usb_clear_port_feature(hdev, port1, USB_PORT_FEAT_C_CONNECTION);
 	if (!port_dev->is_superspeed)
 		usb_clear_port_feature(hdev, port1, USB_PORT_FEAT_C_ENABLE);
@@ -616,9 +615,6 @@ void usb_hub_remove_port_device(struct usb_hub *hub, int port1)
 {
 	struct usb_port *port_dev = hub->ports[port1 - 1];
 	struct usb_port *peer;
-
-	if (port_dev == NULL)
-		return;
 
 	peer = port_dev->peer;
 	if (peer)

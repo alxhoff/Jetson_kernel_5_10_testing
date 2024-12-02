@@ -119,7 +119,6 @@ struct ina2xx_data {
 	long power_lsb_uW;
 	struct mutex config_lock;
 	struct regmap *regmap;
-	const char *label;
 
 	const struct attribute_group *groups[INA2XX_MAX_ATTRIBUTE_GROUPS];
 };
@@ -311,16 +310,7 @@ static ssize_t ina2xx_value_show(struct device *dev,
 	if (err < 0)
 		return err;
 
-	return snprintf(buf, PAGE_SIZE, "%d\n",
-			ina2xx_get_value(data, attr->index, regval));
-}
-
-static ssize_t ina2xx_string_show(struct device *dev,
-				 struct device_attribute *da, char *buf)
-{
-	struct ina2xx_data *data = dev_get_drvdata(dev);
-
-	return sprintf(buf, "%s\n", data->label);
+	return sysfs_emit(buf, "%d\n", ina2xx_get_value(data, attr->index, regval));
 }
 
 static int ina226_reg_to_alert(struct ina2xx_data *data, u8 bit, u16 regval)
@@ -395,7 +385,7 @@ static ssize_t ina226_alert_show(struct device *dev,
 		val = ina226_reg_to_alert(data, attr->index, regval);
 	}
 
-	ret = snprintf(buf, PAGE_SIZE, "%d\n", val);
+	ret = sysfs_emit(buf, "%d\n", val);
 abort:
 	mutex_unlock(&data->config_lock);
 	return ret;
@@ -459,7 +449,7 @@ static ssize_t ina226_alarm_show(struct device *dev,
 
 	alarm = (regval & BIT(attr->index)) &&
 		(regval & INA226_ALERT_FUNCTION_FLAG);
-	return snprintf(buf, PAGE_SIZE, "%d\n", alarm);
+	return sysfs_emit(buf, "%d\n", alarm);
 }
 
 /*
@@ -490,7 +480,7 @@ static ssize_t ina2xx_shunt_show(struct device *dev,
 {
 	struct ina2xx_data *data = dev_get_drvdata(dev);
 
-	return snprintf(buf, PAGE_SIZE, "%li\n", data->rshunt);
+	return sysfs_emit(buf, "%li\n", data->rshunt);
 }
 
 static ssize_t ina2xx_shunt_store(struct device *dev,
@@ -546,7 +536,7 @@ static ssize_t ina226_interval_show(struct device *dev,
 	if (status)
 		return status;
 
-	return snprintf(buf, PAGE_SIZE, "%d\n", ina226_reg_to_interval(regval));
+	return sysfs_emit(buf, "%d\n", ina226_reg_to_interval(regval));
 }
 
 /* shunt voltage */
@@ -587,9 +577,6 @@ static SENSOR_DEVICE_ATTR_RO(power1_crit_alarm, ina226_alarm,
 /* shunt resistance */
 static SENSOR_DEVICE_ATTR_RW(shunt_resistor, ina2xx_shunt, INA2XX_CALIBRATION);
 
-/* channel label */
-static SENSOR_DEVICE_ATTR_RO(in1_label, ina2xx_string, 0);
-
 /* update interval (ina226 only) */
 static SENSOR_DEVICE_ATTR_RW(update_interval, ina226_interval, 0);
 
@@ -600,7 +587,6 @@ static struct attribute *ina2xx_attrs[] = {
 	&sensor_dev_attr_curr1_input.dev_attr.attr,
 	&sensor_dev_attr_power1_input.dev_attr.attr,
 	&sensor_dev_attr_shunt_resistor.dev_attr.attr,
-	&sensor_dev_attr_in1_label.dev_attr.attr,
 	NULL,
 };
 
@@ -661,8 +647,6 @@ static int ina2xx_probe(struct i2c_client *client)
 	}
 
 	ina2xx_set_shunt(data, val);
-
-	of_property_read_string(dev->of_node, "label", &data->label);
 
 	ina2xx_regmap_config.max_register = data->config->registers;
 

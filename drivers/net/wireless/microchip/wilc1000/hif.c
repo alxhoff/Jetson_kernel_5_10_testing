@@ -467,14 +467,25 @@ void *wilc_parse_join_bss_param(struct cfg80211_bss *bss,
 
 	rsn_ie = cfg80211_find_ie(WLAN_EID_RSN, ies->data, ies->len);
 	if (rsn_ie) {
+		int rsn_ie_len = sizeof(struct element) + rsn_ie[1];
 		int offset = 8;
 
 		param->mode_802_11i = 2;
 		param->rsn_found = true;
+
 		/* extract RSN capabilities */
-		offset += (rsn_ie[offset] * 4) + 2;
-		offset += (rsn_ie[offset] * 4) + 2;
-		memcpy(param->rsn_cap, &rsn_ie[offset], 2);
+		if (offset < rsn_ie_len) {
+			/* skip over pairwise suites */
+			offset += (rsn_ie[offset] * 4) + 2;
+
+			if (offset < rsn_ie_len) {
+				/* skip over authentication suites */
+				offset += (rsn_ie[offset] * 4) + 2;
+
+				if (offset + 1 < rsn_ie_len)
+					memcpy(param->rsn_cap, &rsn_ie[offset], 2);
+			}
+		}
 	}
 
 	if (param->rsn_found) {
@@ -1270,6 +1281,23 @@ int wilc_get_mac_address(struct wilc_vif *vif, u8 *mac_addr)
 	wid.val = mac_addr;
 
 	result = wilc_send_config_pkt(vif, WILC_GET_CFG, &wid, 1);
+	if (result)
+		netdev_err(vif->ndev, "Failed to get mac address\n");
+
+	return result;
+}
+
+int wilc_set_mac_address(struct wilc_vif *vif, u8 *mac_addr)
+{
+	struct wid wid;
+	int result;
+
+	wid.id = WID_MAC_ADDR;
+	wid.type = WID_STR;
+	wid.size = ETH_ALEN;
+	wid.val = mac_addr;
+
+	result = wilc_send_config_pkt(vif, WILC_SET_CFG, &wid, 1);
 	if (result)
 		netdev_err(vif->ndev, "Failed to get mac address\n");
 

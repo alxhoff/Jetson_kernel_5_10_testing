@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-only
 /*
- * Copyright (c) 2012-2020, NVIDIA CORPORATION.  All rights reserved.
+ * Copyright (c) 2012, 2013, NVIDIA CORPORATION.  All rights reserved.
  */
 
 #include <linux/io.h>
@@ -1317,13 +1317,13 @@ static void __init tegra114_clock_init(struct device_node *np)
 	}
 
 	pmc_base = of_iomap(node, 0);
+	of_node_put(node);
 	if (!pmc_base) {
 		pr_err("Can't map pmc registers\n");
 		WARN_ON(1);
 		return;
 	}
 
-	has_ccplex_therm_control = true;
 	clks = tegra_clk_init(clk_base, TEGRA114_CLK_CLK_MAX,
 				TEGRA114_CLK_PERIPH_BANKS);
 	if (!clks)

@@ -229,6 +229,7 @@ static void put_ep (struct ep_data *data)
  */
 
 static const char *CHIP;
+static DEFINE_MUTEX(sb_mutex);		/* Serialize superblock operations */
 
 /*----------------------------------------------------------------------*/
 
@@ -362,6 +363,7 @@ ep_io (struct ep_data *epdata, void *buf, unsigned len)
 				spin_unlock_irq (&epdata->dev->lock);
 
 				DBG (epdata->dev, "endpoint gone\n");
+				wait_for_completion(&done);
 				epdata->status = -ENODEV;
 			}
 		}
@@ -500,7 +502,8 @@ static void ep_aio_complete(struct usb_ep *ep, struct usb_request *req)
 		iocb->private = NULL;
 		/* aio_complete() reports bytes-transferred _and_ faults */
 
-		iocb->ki_complete(iocb, req->actual ? req->actual : req->status,
+		iocb->ki_complete(iocb,
+				req->actual ? req->actual : (long)req->status,
 				req->status);
 	} else {
 		/* ep_copy_to_user() won't report both; we hide some faults */
@@ -1215,8 +1218,8 @@ dev_release (struct inode *inode, struct file *fd)
 static __poll_t
 ep0_poll (struct file *fd, poll_table *wait)
 {
-       struct dev_data         *dev = fd->private_data;
-       __poll_t                mask = 0;
+	struct dev_data         *dev = fd->private_data;
+	__poll_t                mask = 0;
 
 	if (dev->state <= STATE_DEV_OPENED)
 		return DEFAULT_POLLMASK;
@@ -2011,13 +2014,20 @@ gadgetfs_fill_super (struct super_block *sb, struct fs_context *fc)
 {
 	struct inode	*inode;
 	struct dev_data	*dev;
+	int		rc;
 
-	if (the_device)
-		return -ESRCH;
+	mutex_lock(&sb_mutex);
+
+	if (the_device) {
+		rc = -ESRCH;
+		goto Done;
+	}
 
 	CHIP = usb_get_gadget_udc_name();
-	if (!CHIP)
-		return -ENODEV;
+	if (!CHIP) {
+		rc = -ENODEV;
+		goto Done;
+	}
 
 	/* superblock */
 	sb->s_blocksize = PAGE_SIZE;
@@ -2054,13 +2064,17 @@ gadgetfs_fill_super (struct super_block *sb, struct fs_context *fc)
 	 * from binding to a controller.
 	 */
 	the_device = dev;
-	return 0;
+	rc = 0;
+	goto Done;
 
-Enomem:
+ Enomem:
 	kfree(CHIP);
 	CHIP = NULL;
+	rc = -ENOMEM;
 
-	return -ENOMEM;
+ Done:
+	mutex_unlock(&sb_mutex);
+	return rc;
 }
 
 /* "mount -t gadgetfs path /dev/gadget" ends up here */
@@ -2082,6 +2096,7 @@ static int gadgetfs_init_fs_context(struct fs_context *fc)
 static void
 gadgetfs_kill_sb (struct super_block *sb)
 {
+	mutex_lock(&sb_mutex);
 	kill_litter_super (sb);
 	if (the_device) {
 		put_dev (the_device);
@@ -2089,6 +2104,7 @@ gadgetfs_kill_sb (struct super_block *sb)
 	}
 	kfree(CHIP);
 	CHIP = NULL;
+	mutex_unlock(&sb_mutex);
 }
 
 /*----------------------------------------------------------------------*/

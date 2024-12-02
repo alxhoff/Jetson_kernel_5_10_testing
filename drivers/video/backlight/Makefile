@@ -1,8 +1,6 @@
 # SPDX-License-Identifier: GPL-2.0
 # Backlight & LCD drivers
 
-ccflags-y += -I$(srctree.nvidia)/drivers/video/tegra/dc/panel
-
 obj-$(CONFIG_LCD_AMS369FG06)		+= ams369fg06.o
 obj-$(CONFIG_LCD_CLASS_DEVICE)		+= lcd.o
 obj-$(CONFIG_LCD_CORGI)			+= corgi_lcd.o
@@ -51,6 +49,7 @@ obj-$(CONFIG_BACKLIGHT_PANDORA)		+= pandora_bl.o
 obj-$(CONFIG_BACKLIGHT_PCF50633)	+= pcf50633-backlight.o
 obj-$(CONFIG_BACKLIGHT_PWM)		+= pwm_bl.o
 obj-$(CONFIG_BACKLIGHT_QCOM_WLED)	+= qcom-wled.o
+obj-$(CONFIG_BACKLIGHT_RT4831)		+= rt4831-backlight.o
 obj-$(CONFIG_BACKLIGHT_SAHARA)		+= kb3886_bl.o
 obj-$(CONFIG_BACKLIGHT_SKY81452)	+= sky81452-backlight.o
 obj-$(CONFIG_BACKLIGHT_TOSA)		+= tosa_bl.o

@@ -178,7 +178,8 @@ static int exfat_map_cluster(struct inode *inode, unsigned int clu_offset,
 			return -EIO;
 		}
 
-		ret = exfat_alloc_cluster(inode, num_to_be_allocated, &new_clu);
+		ret = exfat_alloc_cluster(inode, num_to_be_allocated, &new_clu,
+				inode_needs_sync(inode));
 		if (ret)
 			return ret;
 
@@ -242,8 +243,7 @@ static int exfat_map_cluster(struct inode *inode, unsigned int clu_offset,
 				return err;
 		} /* end of if != DIR_DELETED */
 
-		inode->i_blocks +=
-			num_to_be_allocated << sbi->sect_per_clus_bits;
+		inode->i_blocks += EXFAT_CLU_TO_B(num_to_be_allocated, sbi) >> 9;
 
 		/*
 		 * Move *clu pointer along FAT chains (hole care) because the
@@ -489,6 +489,7 @@ int exfat_block_truncate_page(struct inode *inode, loff_t from)
 }
 
 static const struct address_space_operations exfat_aops = {
+	.set_page_dirty	= __set_page_dirty_buffers,
 	.readpage	= exfat_readpage,
 	.readahead	= exfat_readahead,
 	.writepage	= exfat_writepage,
@@ -600,8 +601,7 @@ static int exfat_fill_inode(struct inode *inode, struct exfat_dir_entry *info)
 
 	exfat_save_attr(inode, info->attr);
 
-	inode->i_blocks = round_up(i_size_read(inode), sbi->cluster_size) >>
-				inode->i_blkbits;
+	inode->i_blocks = round_up(i_size_read(inode), sbi->cluster_size) >> 9;
 	inode->i_mtime = info->mtime;
 	inode->i_ctime = info->mtime;
 	ei->i_crtime = info->crtime;

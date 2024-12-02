@@ -59,7 +59,7 @@ static DECLARE_BITMAP(minors, N_SPI_MINORS);
  *
  * REVISIT should changing those flags be privileged?
  */
-#define SPI_MODE_MASK		(SPI_CPHA | SPI_CPOL | SPI_CS_HIGH \
+#define SPI_MODE_MASK		(SPI_MODE_X_MASK | SPI_CS_HIGH \
 				| SPI_LSB_FIRST | SPI_3WIRE | SPI_LOOP \
 				| SPI_NO_CS | SPI_READY | SPI_TX_DUAL \
 				| SPI_TX_QUAD | SPI_TX_OCTAL | SPI_RX_DUAL \
@@ -82,9 +82,9 @@ struct spidev_data {
 static LIST_HEAD(device_list);
 static DEFINE_MUTEX(device_list_lock);
 
-static unsigned int bufsize = 8192;
-module_param(bufsize, uint, S_IRUGO);
-MODULE_PARM_DESC(bufsize, "data bytes in biggest supported SPI message");
+static unsigned bufsiz = 4096;
+module_param(bufsiz, uint, S_IRUGO);
+MODULE_PARM_DESC(bufsiz, "data bytes in biggest supported SPI message");
 
 /*-------------------------------------------------------------------------*/
 
@@ -149,7 +149,7 @@ spidev_read(struct file *filp, char __user *buf, size_t count, loff_t *f_pos)
 	ssize_t			status;
 
 	/* chipselect only toggles at start or end of operation */
-	if (count > bufsize)
+	if (count > bufsiz)
 		return -EMSGSIZE;
 
 	spidev = filp->private_data;
@@ -180,7 +180,7 @@ spidev_write(struct file *filp, const char __user *buf,
 	unsigned long		missing;
 
 	/* chipselect only toggles at start or end of operation */
-	if (count > bufsize)
+	if (count > bufsiz)
 		return -EMSGSIZE;
 
 	spidev = filp->private_data;
@@ -194,28 +194,6 @@ spidev_write(struct file *filp, const char __user *buf,
 	mutex_unlock(&spidev->buf_lock);
 
 	return status;
-}
-
-static int spidev_start_controller(struct spidev_data *spidev,
-				   struct spi_ioc_transfer *u_xfer)
-{
-	struct spi_transfer	*t;
-	int ret;
-
-	t = kzalloc(sizeof(*t), GFP_KERNEL);
-	if (t == NULL)
-		return -ENOMEM;
-
-	t->speed_hz = u_xfer->speed_hz;
-	t->bits_per_word = u_xfer->bits_per_word;
-	t->delay_usecs = u_xfer->delay_usecs;
-	t->cs_change = u_xfer->cs_change;
-	t->tx_nbits = u_xfer->tx_nbits;
-	t->rx_nbits = u_xfer->rx_nbits;
-
-	ret = spi_start_controller(spidev->spi, t);
-
-	return ret;
 }
 
 static int spidev_message(struct spidev_data *spidev,
@@ -267,7 +245,7 @@ static int spidev_message(struct spidev_data *spidev,
 		if (u_tmp->rx_buf) {
 			/* this transfer needs space in RX bounce buffer */
 			rx_total += len_aligned;
-			if (rx_total > bufsize) {
+			if (rx_total > bufsiz) {
 				status = -EMSGSIZE;
 				goto done;
 			}
@@ -277,7 +255,7 @@ static int spidev_message(struct spidev_data *spidev,
 		if (u_tmp->tx_buf) {
 			/* this transfer needs space in TX bounce buffer */
 			tx_total += len_aligned;
-			if (tx_total > bufsize) {
+			if (tx_total > bufsiz) {
 				status = -EMSGSIZE;
 				goto done;
 			}
@@ -347,6 +325,7 @@ spidev_get_ioc_message(unsigned int cmd, struct spi_ioc_transfer __user *u_ioc,
 
 	/* Check type, command number and direction */
 	if (_IOC_TYPE(cmd) != SPI_IOC_MAGIC
+			|| _IOC_NR(cmd) != _IOC_NR(SPI_IOC_MESSAGE(0))
 			|| _IOC_DIR(cmd) != _IOC_WRITE)
 		return ERR_PTR(-ENOTTY);
 
@@ -397,12 +376,23 @@ spidev_ioctl(struct file *filp, unsigned int cmd, unsigned long arg)
 	switch (cmd) {
 	/* read requests */
 	case SPI_IOC_RD_MODE:
-		retval = put_user(spi->mode & SPI_MODE_MASK,
-					(__u8 __user *)arg);
-		break;
 	case SPI_IOC_RD_MODE32:
-		retval = put_user(spi->mode & SPI_MODE_MASK,
-					(__u32 __user *)arg);
+		tmp = spi->mode;
+
+		{
+			struct spi_controller *ctlr = spi->controller;
+
+			if (ctlr->use_gpio_descriptors && ctlr->cs_gpiods &&
+			    ctlr->cs_gpiods[spi->chip_select])
+				tmp &= ~SPI_CS_HIGH;
+		}
+
+		if (cmd == SPI_IOC_RD_MODE)
+			retval = put_user(tmp & SPI_MODE_MASK,
+					  (__u8 __user *)arg);
+		else
+			retval = put_user(tmp & SPI_MODE_MASK,
+					  (__u32 __user *)arg);
 		break;
 	case SPI_IOC_RD_LSB_FIRST:
 		retval = put_user((spi->mode & SPI_LSB_FIRST) ?  1 : 0,
@@ -488,25 +478,6 @@ spidev_ioctl(struct file *filp, unsigned int cmd, unsigned long arg)
 			}
 			spi->max_speed_hz = save;
 		}
-		break;
-
-	case SPI_IOC_WR_START_CTRL:
-		ioc = spidev_get_ioc_message(cmd,
-				(struct spi_ioc_transfer __user *)arg, &n_ioc);
-		if (IS_ERR(ioc)) {
-			retval = PTR_ERR(ioc);
-			break;
-		}
-		if (!ioc)
-			break;	/* n_ioc is also 0 */
-
-		/* translate to spi_message, execute */
-		retval = spidev_start_controller(spidev, ioc);
-		kfree(ioc);
-		break;
-
-	case SPI_IOC_STOP_CTRL:
-		spi_stop_controller(spidev->spi);
 		break;
 
 	default:
@@ -619,18 +590,16 @@ static int spidev_open(struct inode *inode, struct file *filp)
 	}
 
 	if (!spidev->tx_buffer) {
-		spidev->tx_buffer = kmalloc(bufsize, GFP_KERNEL);
+		spidev->tx_buffer = kmalloc(bufsiz, GFP_KERNEL);
 		if (!spidev->tx_buffer) {
-			dev_dbg(&spidev->spi->dev, "open/ENOMEM\n");
 			status = -ENOMEM;
 			goto err_find_dev;
 		}
 	}
 
 	if (!spidev->rx_buffer) {
-		spidev->rx_buffer = kmalloc(bufsize, GFP_KERNEL);
+		spidev->rx_buffer = kmalloc(bufsiz, GFP_KERNEL);
 		if (!spidev->rx_buffer) {
-			dev_dbg(&spidev->spi->dev, "open/ENOMEM\n");
 			status = -ENOMEM;
 			goto err_alloc_rx_buf;
 		}
@@ -713,15 +682,31 @@ static const struct file_operations spidev_fops = {
 
 static struct class *spidev_class;
 
+static const struct spi_device_id spidev_spi_ids[] = {
+	{ .name = "dh2228fv" },
+	{ .name = "ltc2488" },
+	{ .name = "sx1301" },
+	{ .name = "bk4" },
+	{ .name = "dhcom-board" },
+	{ .name = "m53cpld" },
+	{ .name = "spi-petra" },
+	{ .name = "spi-authenta" },
+	{ .name = "tegra-spidev" },
+	{},
+};
+MODULE_DEVICE_TABLE(spi, spidev_spi_ids);
+
 #ifdef CONFIG_OF
 static const struct of_device_id spidev_dt_ids[] = {
 	{ .compatible = "rohm,dh2228fv" },
 	{ .compatible = "lineartechnology,ltc2488" },
-	{ .compatible = "ge,achc" },
 	{ .compatible = "semtech,sx1301" },
 	{ .compatible = "lwn,bk4" },
 	{ .compatible = "dh,dhcom-board" },
 	{ .compatible = "menlo,m53cpld" },
+	{ .compatible = "cisco,spi-petra" },
+	{ .compatible = "micron,spi-authenta" },
+	{ .compatible = "nvidia,tegra-spidev" },
 	{ .compatible = "tegra-spidev" },
 	{},
 };
@@ -858,6 +843,7 @@ static struct spi_driver spidev_spi_driver = {
 	},
 	.probe =	spidev_probe,
 	.remove =	spidev_remove,
+	.id_table =	spidev_spi_ids,
 
 	/* NOTE:  suspend/resume methods are not necessary here.
 	 * We don't do anything except pass the requests to/from

@@ -518,6 +518,12 @@ static ssize_t read_only_show(struct device *dev,
 	return sprintf(buf, "%d\n", nd_region->ro);
 }
 
+static int revalidate_read_only(struct device *dev, void *data)
+{
+	nd_device_notify(dev, NVDIMM_REVALIDATE_REGION);
+	return 0;
+}
+
 static ssize_t read_only_store(struct device *dev,
 		struct device_attribute *attr, const char *buf, size_t len)
 {
@@ -529,6 +535,7 @@ static ssize_t read_only_store(struct device *dev,
 		return rc;
 
 	nd_region->ro = ro;
+	device_for_each_child(dev, NULL, revalidate_read_only);
 	return len;
 }
 static DEVICE_ATTR_RW(read_only);
@@ -959,7 +966,8 @@ unsigned int nd_region_acquire_lane(struct nd_region *nd_region)
 {
 	unsigned int cpu, lane;
 
-	cpu = get_cpu();
+	migrate_disable();
+	cpu = smp_processor_id();
 	if (nd_region->num_lanes < nr_cpu_ids) {
 		struct nd_percpu_lane *ndl_lock, *ndl_count;
 
@@ -978,16 +986,15 @@ EXPORT_SYMBOL(nd_region_acquire_lane);
 void nd_region_release_lane(struct nd_region *nd_region, unsigned int lane)
 {
 	if (nd_region->num_lanes < nr_cpu_ids) {
-		unsigned int cpu = get_cpu();
+		unsigned int cpu = smp_processor_id();
 		struct nd_percpu_lane *ndl_lock, *ndl_count;
 
 		ndl_count = per_cpu_ptr(nd_region->lane, cpu);
 		ndl_lock = per_cpu_ptr(nd_region->lane, lane);
 		if (--ndl_count->count == 0)
 			spin_unlock(&ndl_lock->lock);
-		put_cpu();
 	}
-	put_cpu();
+	migrate_enable();
 }
 EXPORT_SYMBOL(nd_region_release_lane);
 

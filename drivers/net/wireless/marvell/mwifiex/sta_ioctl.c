@@ -570,6 +570,24 @@ int mwifiex_enable_hs(struct mwifiex_adapter *adapter)
 }
 EXPORT_SYMBOL_GPL(mwifiex_enable_hs);
 
+int mwifiex_set_led(struct mwifiex_adapter *adapter, int on)
+{
+	struct mwifiex_private *priv;
+	struct mwifiex_led_param ledcfg;
+
+	priv = mwifiex_get_priv(adapter, MWIFIEX_BSS_ROLE_STA);
+	if (!priv->is_edge_gateway)
+		return -ENODEV;
+
+	memset(&ledcfg, 0, sizeof(struct mwifiex_led_param));
+	ledcfg.on = cpu_to_le16(on);
+
+	return mwifiex_send_cmd(priv,
+				HostCmd_CMD_802_11_LED_CONTROL,
+				HostCmd_ACT_GEN_SET, 0,
+				&ledcfg, true);
+}
+
 /*
  * IOCTL request handler to get BSS information.
  *
@@ -1325,8 +1343,8 @@ mwifiex_set_gen_ie_helper(struct mwifiex_private *priv, u8 *ie_data_ptr,
 			  u16 ie_len)
 {
 	struct ieee_types_vendor_header *pvendor_ie;
-	const u8 wpa_oui[] = { 0x00, 0x50, 0xf2, 0x01 };
-	const u8 wps_oui[] = { 0x00, 0x50, 0xf2, 0x04 };
+	static const u8 wpa_oui[] = { 0x00, 0x50, 0xf2, 0x01 };
+	static const u8 wps_oui[] = { 0x00, 0x50, 0xf2, 0x04 };
 	u16 unparsed_len = ie_len, cur_ie_len;
 
 	/* If the passed length is zero, reset the buffer */

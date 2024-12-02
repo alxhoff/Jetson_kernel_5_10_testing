@@ -21,7 +21,6 @@
  */
 extern void (*pm_power_off)(void);
 extern void (*pm_power_off_prepare)(void);
-extern void (*pm_power_reset)(void);
 
 struct device; /* we have a circular dep with device.h */
 #ifdef CONFIG_VT_CONSOLE_SLEEP
@@ -40,7 +39,6 @@ static inline void pm_vt_switch_unregister(struct device *dev)
  * Device power management
  */
 
-struct device;
 
 #ifdef CONFIG_PM
 extern const char power_group_name[];		/* = "power" */
@@ -538,6 +536,8 @@ struct pm_subsys_data {
 	spinlock_t lock;
 	unsigned int refcount;
 #ifdef CONFIG_PM_CLK
+	unsigned int clock_op_might_sleep;
+	struct mutex clock_mutex;
 	struct list_head clock_list;
 #endif
 #ifdef CONFIG_PM_GENERIC_DOMAINS

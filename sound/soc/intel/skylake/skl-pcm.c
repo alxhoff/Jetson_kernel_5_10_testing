@@ -251,8 +251,10 @@ static int skl_pcm_open(struct snd_pcm_substream *substream,
 	snd_pcm_set_sync(substream);
 
 	mconfig = skl_tplg_fe_get_cpr_module(dai, substream->stream);
-	if (!mconfig)
+	if (!mconfig) {
+		kfree(dma_params);
 		return -EINVAL;
+	}
 
 	skl_tplg_d0i3_get(skl, mconfig->d0i3_caps);
 
@@ -502,7 +504,6 @@ static int skl_pcm_trigger(struct snd_pcm_substream *substream, int cmd,
 		if (ret < 0)
 			return ret;
 		return skl_run_pipe(skl, mconfig->pipe);
-		break;
 
 	case SNDRV_PCM_TRIGGER_PAUSE_PUSH:
 	case SNDRV_PCM_TRIGGER_SUSPEND:
@@ -563,11 +564,8 @@ static int skl_link_hw_params(struct snd_pcm_substream *substream,
 
 	stream_tag = hdac_stream(link_dev)->stream_tag;
 
-	/* set the stream tag in the codec dai dma params  */
-	if (substream->stream == SNDRV_PCM_STREAM_PLAYBACK)
-		snd_soc_dai_set_tdm_slot(codec_dai, stream_tag, 0, 0, 0);
-	else
-		snd_soc_dai_set_tdm_slot(codec_dai, 0, stream_tag, 0, 0);
+	/* set the hdac_stream in the codec dai */
+	snd_soc_dai_set_stream(codec_dai, hdac_stream(link_dev), substream->stream);
 
 	p_params.s_fmt = snd_pcm_format_width(params_format(params));
 	p_params.ch = params_channels(params);
@@ -1215,13 +1213,6 @@ static snd_pcm_uframes_t skl_platform_soc_pointer(
 	return bytes_to_frames(substream->runtime, pos);
 }
 
-static int skl_platform_soc_mmap(struct snd_soc_component *component,
-				 struct snd_pcm_substream *substream,
-				 struct vm_area_struct *area)
-{
-	return snd_pcm_lib_default_mmap(substream, area);
-}
-
 static u64 skl_adjust_codec_delay(struct snd_pcm_substream *substream,
 				u64 nsec)
 {
@@ -1259,7 +1250,6 @@ static int skl_platform_soc_get_time_info(
 		snd_pcm_gettime(substream->runtime, system_ts);
 
 		nsec = timecounter_read(&hstr->tc);
-		nsec = div_u64(nsec, 3); /* can be optimized */
 		if (audio_tstamp_config->report_delay)
 			nsec = skl_adjust_codec_delay(substream, nsec);
 
@@ -1454,7 +1444,6 @@ static const struct snd_soc_component_driver skl_component  = {
 	.trigger	= skl_platform_soc_trigger,
 	.pointer	= skl_platform_soc_pointer,
 	.get_time_info	= skl_platform_soc_get_time_info,
-	.mmap		= skl_platform_soc_mmap,
 	.pcm_construct	= skl_platform_soc_new,
 	.module_get_upon_open = 1, /* increment refcount when a pcm is opened */
 };
@@ -1478,6 +1467,7 @@ int skl_platform_register(struct device *dev)
 		dais = krealloc(skl->dais, sizeof(skl_fe_dai) +
 				sizeof(skl_platform_dai), GFP_KERNEL);
 		if (!dais) {
+			kfree(skl->dais);
 			ret = -ENOMEM;
 			goto err;
 		}
@@ -1490,8 +1480,10 @@ int skl_platform_register(struct device *dev)
 
 	ret = devm_snd_soc_register_component(dev, &skl_component,
 					 skl->dais, num_dais);
-	if (ret)
+	if (ret) {
+		kfree(skl->dais);
 		dev_err(dev, "soc component registration failed %d\n", ret);
+	}
 err:
 	return ret;
 }

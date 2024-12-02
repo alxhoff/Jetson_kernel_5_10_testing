@@ -1,4 +1,4 @@
-/* SPDX-License-Identifier: GPL-2.0 OR MIT */
+/* SPDX-License-Identifier: GPL-2.0-only */
 /*
  * Copyright (c) 2014-2022, NVIDIA CORPORATION.  All rights reserved.
  */
@@ -206,6 +206,7 @@ struct mrq_request {
 	 * | MRQ_PWR_LIMIT        | CMD_PWR_LIMIT_QUERY_ABI              | 8                                          |
 	 * | MRQ_PWR_LIMIT        | CMD_PWR_LIMIT_SET                    | 20                                         |
 	 * | MRQ_PWR_LIMIT        | CMD_PWR_LIMIT_GET                    | 16                                         |
+	 * | MRQ_PWR_LIMIT        | CMD_PWR_LIMIT_CURR_CAP               | 8                                          |
 	 * | MRQ_GEARS            |                                      | 0                                          |
 	 * | MRQ_BWMGR_INT        | CMD_BWMGR_INT_QUERY_ABI              | 8                                          |
 	 * | MRQ_BWMGR_INT        | CMD_BWMGR_INT_CALC_AND_SET           | 16                                         |
@@ -341,6 +342,31 @@ struct mrq_response {
 #define MRQ_BWMGR_INT		83U
 #define MRQ_OC_STATUS		84U
 
+/** @cond DEPRECATED */
+#define MRQ_RESERVED_2		2U
+#define MRQ_RESERVED_3		3U
+#define MRQ_RESERVED_4		4U
+#define MRQ_RESERVED_5   	5U
+#define MRQ_RESERVED_6		6U
+#define MRQ_RESERVED_7		7U
+#define MRQ_RESERVED_8		8U
+#define MRQ_RESERVED_10		10U
+#define MRQ_RESERVED_11		11U
+#define MRQ_RESERVED_12		12U
+#define MRQ_RESERVED_13		13U
+#define MRQ_RESERVED_14		14U
+#define MRQ_RESERVED_15		15U
+#define MRQ_RESERVED_16		16U
+#define MRQ_RESERVED_17		17U
+#define MRQ_RESERVED_18		18U
+#define MRQ_RESERVED_24		24U
+#define MRQ_RESERVED_25		25U
+#define MRQ_RESERVED_26		26U
+#define MRQ_RESERVED_30		30U
+#define MRQ_RESERVED_64		64U
+#define MRQ_RESERVED_74		74U
+/** @endcond DEPRECATED */
+
 /** @} */
 
 /**
@@ -376,12 +402,11 @@ struct mrq_response {
  *   @defgroup CC3 Auto-CC3
  *   @defgroup FMON FMON
  *   @defgroup EC EC
- *   @defgroup Fbvolt_status Fuse Burn Voltage Status
  *   @defgroup Telemetry Telemetry
  *   @defgroup Pwrlimit PWR_LIMIT
  *   @defgroup Gears Gears
  *   @defgroup BWMGR_INT Bandwidth Manager Integrated
- * @}
+ * @} MRQ_Payloads
  */
 
 /**
@@ -492,190 +517,6 @@ struct mrq_query_fw_tag_response {
 	uint8_t tag[32];
 } BPMP_ABI_PACKED;
 
-/**
- * @ingroup MRQ_Codes
- * @def MRQ_MODULE_LOAD
- * @brief Dynamically load a BPMP code module
- *
- * * Platforms: T210, T210B01, T186
- * @cond (bpmp_t210 || bpmp_t210b01 || bpmp_t186)
- * * Initiators: CCPLEX
- * * Targets: BPMP
- * * Request Payload: @ref mrq_module_load_request
- * * Response Payload: @ref mrq_module_load_response
- *
- * @note This MRQ is disabled on production systems
- *
- */
-
-/**
- * @ingroup Module
- * @brief Request with #MRQ_MODULE_LOAD
- *
- * Used by #MRQ_MODULE_LOAD calls to ask the recipient to dynamically
- * load the code located at #phys_addr and having size #size
- * bytes. #phys_addr is treated as a void pointer.
- *
- * The recipient copies the code from #phys_addr to locally allocated
- * memory prior to responding to this message.
- *
- * @todo document the module header format
- *
- * The sender is responsible for ensuring that the code is mapped in
- * the recipient's address map.
- *
- */
-struct mrq_module_load_request {
-	/** @brief Base address of the code to load */
-	uint32_t phys_addr;
-	/** @brief Size in bytes of code to load */
-	uint32_t size;
-} BPMP_ABI_PACKED;
-
-/**
- * @ingroup Module
- * @brief Response to #MRQ_MODULE_LOAD
- *
- * @todo document mrq_response::err
- */
-struct mrq_module_load_response {
-	/** @brief Handle to the loaded module */
-	uint32_t base;
-} BPMP_ABI_PACKED;
-/** @endcond*/
-
-/**
- * @ingroup MRQ_Codes
- * @def MRQ_MODULE_UNLOAD
- * @brief Unload a previously loaded code module
- *
- * * Platforms: T210, T210B01, T186
- * @cond (bpmp_t210 || bpmp_t210b01 || bpmp_t186)
- * * Initiators: CCPLEX
- * * Targets: BPMP
- * * Request Payload: @ref mrq_module_unload_request
- * * Response Payload: N/A
- *
- * @note This MRQ is disabled on production systems
- */
-
-/**
- * @ingroup Module
- * @brief Request with #MRQ_MODULE_UNLOAD
- *
- * Used by #MRQ_MODULE_UNLOAD calls to request that a previously loaded
- * module be unloaded.
- */
-struct mrq_module_unload_request {
-	/** @brief Handle of the module to unload */
-	uint32_t base;
-} BPMP_ABI_PACKED;
-/** @endcond*/
-
-/**
- * @ingroup MRQ_Codes
- * @def MRQ_TRACE_MODIFY
- * @brief Modify the set of enabled trace events
- *
- * @deprecated
- *
- * * Platforms: All
- * * Initiators: CCPLEX
- * * Targets: BPMP
- * * Request Payload: @ref mrq_trace_modify_request
- * * Response Payload: @ref mrq_trace_modify_response
- *
- * @note This MRQ is disabled on production systems
- */
-
-/**
- * @ingroup Trace
- * @brief Request with #MRQ_TRACE_MODIFY
- *
- * Used by %MRQ_TRACE_MODIFY calls to enable or disable specify trace
- * events.  #set takes precedence for any bit set in both #set and
- * #clr.
- */
-struct mrq_trace_modify_request {
-	/** @brief Bit mask of trace events to disable */
-	uint32_t clr;
-	/** @brief Bit mask of trace events to enable */
-	uint32_t set;
-} BPMP_ABI_PACKED;
-
-/**
- * @ingroup Trace
- * @brief Response to #MRQ_TRACE_MODIFY
- *
- * Sent in repsonse to an #MRQ_TRACE_MODIFY message. #mask reflects the
- * state of which events are enabled after the recipient acted on the
- * message.
- *
- */
-struct mrq_trace_modify_response {
-	/** @brief Bit mask of trace event enable states */
-	uint32_t mask;
-} BPMP_ABI_PACKED;
-
-/**
- * @ingroup MRQ_Codes
- * @def MRQ_WRITE_TRACE
- * @brief Write trace data to a buffer
- *
- * @deprecated
- *
- * * Platforms: All
- * * Initiators: CCPLEX
- * * Targets: BPMP
- * * Request Payload: @ref mrq_write_trace_request
- * * Response Payload: @ref mrq_write_trace_response
- *
- * mrq_response::err depends on the @ref mrq_write_trace_request field
- * values. err is -#BPMP_EINVAL if size is zero or area is NULL or
- * area is in an illegal range. A positive value for err indicates the
- * number of bytes written to area.
- *
- * @note This MRQ is disabled on production systems
- */
-
-/**
- * @ingroup Trace
- * @brief Request with #MRQ_WRITE_TRACE
- *
- * Used by MRQ_WRITE_TRACE calls to ask the recipient to copy trace
- * data from the recipient's local buffer to the output buffer. #area
- * is treated as a byte-aligned pointer in the recipient's address
- * space.
- *
- * The sender is responsible for ensuring that the output
- * buffer is mapped in the recipient's address map. The recipient is
- * responsible for protecting its own code and data from accidental
- * overwrites.
- */
-struct mrq_write_trace_request {
-	/** @brief Base address of output buffer */
-	uint32_t area;
-	/** @brief Size in bytes of the output buffer */
-	uint32_t size;
-} BPMP_ABI_PACKED;
-
-/**
- * @ingroup Trace
- * @brief Response to #MRQ_WRITE_TRACE
- *
- * Once this response is sent, the respondent will not access the
- * output buffer further.
- */
-struct mrq_write_trace_response {
-	/**
-	 * @brief Flag whether more data remains in local buffer
-	 *
-	 * Value is 1 if the entire local trace buffer has been
-	 * drained to the outputbuffer. Value is 0 otherwise.
-	 */
-	uint32_t eof;
-} BPMP_ABI_PACKED;
-
 /** @private */
 struct mrq_threaded_ping_request {
 	uint32_t challenge;
@@ -685,50 +526,6 @@ struct mrq_threaded_ping_request {
 struct mrq_threaded_ping_response {
 	uint32_t reply;
 } BPMP_ABI_PACKED;
-
-/**
- * @ingroup MRQ_Codes
- * @def MRQ_MODULE_MAIL
- * @brief Send a message to a loadable module
- *
- * * Platforms: T210, T210B01, T186
- * @cond (bpmp_t210 || bpmp_t210b01 || bpmp_t186)
- * * Initiators: Any
- * * Targets: BPMP
- * * Request Payload: @ref mrq_module_mail_request
- * * Response Payload: @ref mrq_module_mail_response
- *
- * @note This MRQ is disabled on production systems
- */
-
-/**
- * @ingroup Module
- * @brief Request with #MRQ_MODULE_MAIL
- */
-struct mrq_module_mail_request {
-	/** @brief Handle to the previously loaded module */
-	uint32_t base;
-	/** @brief Module-specific mail payload
-	 *
-	 * The length of data[ ] is unknown to the BPMP core firmware
-	 * but it is limited to the size of an IPC message.
-	 */
-	uint8_t data[BPMP_ABI_EMPTY_ARRAY];
-} BPMP_ABI_PACKED;
-
-/**
- * @ingroup Module
- * @brief Response to #MRQ_MODULE_MAIL
- */
-struct mrq_module_mail_response {
-	/** @brief Module-specific mail payload
-	 *
-	 * The length of data[ ] is unknown to the BPMP core firmware
-	 * but it is limited to the size of an IPC message.
-	 */
-	uint8_t data[BPMP_ABI_EMPTY_ARRAY];
-} BPMP_ABI_PACKED;
-/** @endcond */
 
 /**
  * @ingroup MRQ_Codes
@@ -874,7 +671,7 @@ struct mrq_debugfs_response {
 #define DEBUGFS_S_ISDIR	(1 << 9)
 #define DEBUGFS_S_IRUSR	(1 << 8)
 #define DEBUGFS_S_IWUSR	(1 << 7)
-/** @} */
+/** @} Debugfs */
 
 /**
  * @ingroup MRQ_Codes
@@ -1119,7 +916,7 @@ enum mrq_reset_commands {
  * @brief Request with MRQ_RESET
  *
  * Used by the sender of an #MRQ_RESET message to request BPMP to
- * assert or or deassert a given reset line.
+ * assert or deassert a given reset line.
  */
 struct mrq_reset_request {
 	/** @brief Reset action to perform (@ref mrq_reset_commands) */
@@ -1158,7 +955,7 @@ struct mrq_reset_response {
 	} BPMP_UNION_ANON;
 } BPMP_ABI_PACKED;
 
-/** @} */
+/** @} Reset */
 
 /**
  * @ingroup MRQ_Codes
@@ -1220,7 +1017,17 @@ struct serial_i2c_request {
  * @brief Trigger one or more i2c transactions
  */
 struct cmd_i2c_xfer_request {
-	/** @brief Valid bus number from @ref bpmp_i2c_ids*/
+	/**
+	 * @brief Tegra PWR_I2C bus identifier
+	 *
+	 * @cond (bpmp_t234 || bpmp_t239 || bpmp_t194)
+	 * Must be set to 5.
+	 * @endcond (bpmp_t234 || bpmp_t239 || bpmp_t194)
+	 * @cond bpmp_th500
+	 * Must be set to 1.
+	 * @endcond bpmp_th500
+	 *
+	 */
 	uint32_t bus_id;
 
 	/** @brief Count of valid bytes in #data_buf*/
@@ -1272,7 +1079,7 @@ struct mrq_i2c_response {
 	struct cmd_i2c_xfer_response xfer;
 } BPMP_ABI_PACKED;
 
-/** @} */
+/** @} I2C */
 
 /**
  * @ingroup MRQ_Codes
@@ -1297,6 +1104,13 @@ enum {
 	CMD_CLK_IS_ENABLED = 6,
 	CMD_CLK_ENABLE = 7,
 	CMD_CLK_DISABLE = 8,
+/** @cond DEPRECATED */
+	CMD_CLK_PROPERTIES = 9,
+	CMD_CLK_POSSIBLE_PARENTS = 10,
+	CMD_CLK_NUM_POSSIBLE_PARENTS = 11,
+	CMD_CLK_GET_POSSIBLE_PARENT = 12,
+	CMD_CLK_RESET_REFCOUNTS = 13,
+/** @endcond DEPRECATED */
 	CMD_CLK_GET_ALL_INFO = 14,
 	CMD_CLK_GET_MAX_CLK_ID = 15,
 	CMD_CLK_GET_FMAX_AT_VMIN = 16,
@@ -1307,6 +1121,21 @@ enum {
 #define BPMP_CLK_HAS_SET_RATE	(1U << 1U)
 #define BPMP_CLK_IS_ROOT	(1U << 2U)
 #define BPMP_CLK_IS_VAR_ROOT	(1U << 3U)
+/**
+ * @brief Protection against rate and parent changes
+ *
+ * #MRQ_CLK command #CMD_CLK_SET_RATE or #MRQ_CLK command #CMD_CLK_SET_PARENT will return
+ * -#BPMP_EACCES.
+ */
+#define BPMP_CLK_RATE_PARENT_CHANGE_DENIED (1U << 30)
+
+/**
+ * @brief Protection against state changes
+ *
+ * #MRQ_CLK command #CMD_CLK_ENABLE or #MRQ_CLK command #CMD_CLK_DISABLE will return
+ * -#BPMP_EACCES.
+ */
+#define BPMP_CLK_STATE_CHANGE_DENIED (1U << 31)
 
 #define MRQ_CLK_NAME_MAXLEN	40U
 #define MRQ_CLK_MAX_PARENTS	16U
@@ -1398,6 +1227,46 @@ struct cmd_clk_disable_response {
 	BPMP_ABI_EMPTY
 } BPMP_ABI_PACKED;
 
+/** @cond DEPRECATED */
+/** @private */
+struct cmd_clk_properties_request {
+	BPMP_ABI_EMPTY
+} BPMP_ABI_PACKED;
+
+/** @todo flags need to be spelled out here */
+struct cmd_clk_properties_response {
+	uint32_t flags;
+} BPMP_ABI_PACKED;
+
+/** @private */
+struct cmd_clk_possible_parents_request {
+	BPMP_ABI_EMPTY
+} BPMP_ABI_PACKED;
+
+struct cmd_clk_possible_parents_response {
+	uint8_t num_parents;
+	uint8_t reserved[3];
+	uint32_t parent_id[MRQ_CLK_MAX_PARENTS];
+} BPMP_ABI_PACKED;
+
+/** @private */
+struct cmd_clk_num_possible_parents_request {
+	BPMP_ABI_EMPTY
+} BPMP_ABI_PACKED;
+
+struct cmd_clk_num_possible_parents_response {
+	uint8_t num_parents;
+} BPMP_ABI_PACKED;
+
+struct cmd_clk_get_possible_parent_request {
+	uint8_t parent_idx;
+} BPMP_ABI_PACKED;
+
+struct cmd_clk_get_possible_parent_response {
+	uint32_t parent_id;
+} BPMP_ABI_PACKED;
+/** @endcond DEPRECATED */
+
 /** @private */
 struct cmd_clk_get_all_info_request {
 	BPMP_ABI_EMPTY
@@ -1429,6 +1298,7 @@ struct cmd_clk_get_fmax_at_vmin_response {
 	int64_t rate;
 } BPMP_ABI_PACKED;
 
+
 /**
  * @ingroup Clocks
  * @brief Request with #MRQ_CLK
@@ -1455,6 +1325,17 @@ struct cmd_clk_get_fmax_at_vmin_response {
  *
  */
 
+/** @cond DEPRECATED
+ *
+ * Older versions of firmware also supported following sub-commands:
+ * |CMD_CLK_PROPERTIES          |-                      |
+ * |CMD_CLK_POSSIBLE_PARENTS    |-                      |
+ * |CMD_CLK_NUM_POSSIBLE_PARENTS|-                      |
+ * |CMD_CLK_GET_POSSIBLE_PARENT |clk_get_possible_parent|
+ * |CMD_CLK_RESET_REFCOUNTS     |-                      |
+ *
+ * @endcond DEPRECATED */
+
 struct mrq_clk_request {
 	/** @brief Sub-command and clock id concatenated to 32-bit word.
 	 * - bits[31..24] is the sub-cmd.
@@ -1476,6 +1357,15 @@ struct mrq_clk_request {
 		struct cmd_clk_disable_request clk_disable;
 		/** @private */
 		struct cmd_clk_is_enabled_request clk_is_enabled;
+		/** @cond DEPRECATED */
+		/** @private */
+		struct cmd_clk_properties_request clk_properties;
+		/** @private */
+		struct cmd_clk_possible_parents_request clk_possible_parents;
+		/** @private */
+		struct cmd_clk_num_possible_parents_request clk_num_possible_parents;
+		struct cmd_clk_get_possible_parent_request clk_get_possible_parent;
+		/** @endcond DEPRECATED */
 		/** @private */
 		struct cmd_clk_get_all_info_request clk_get_all_info;
 		/** @private */
@@ -1509,6 +1399,17 @@ struct mrq_clk_request {
  *
  */
 
+/** @cond DEPRECATED
+ *
+ * Older versions of firmware also supported following sub-commands:
+ * |CMD_CLK_PROPERTIES          |clk_properties          |
+ * |CMD_CLK_POSSIBLE_PARENTS    |clk_possible_parents    |
+ * |CMD_CLK_NUM_POSSIBLE_PARENTS|clk_num_possible_parents|
+ * |CMD_CLK_GET_POSSIBLE_PARENT |clk_get_possible_parents|
+ * |CMD_CLK_RESET_REFCOUNTS     |-                       |
+ *
+ * @endcond DEPRECATED */
+
 struct mrq_clk_response {
 	union {
 		struct cmd_clk_get_rate_response clk_get_rate;
@@ -1521,13 +1422,19 @@ struct mrq_clk_response {
 		/** @private */
 		struct cmd_clk_disable_response clk_disable;
 		struct cmd_clk_is_enabled_response clk_is_enabled;
+		/** @cond DEPRECATED */
+		struct cmd_clk_properties_response clk_properties;
+		struct cmd_clk_possible_parents_response clk_possible_parents;
+		struct cmd_clk_num_possible_parents_response clk_num_possible_parents;
+		struct cmd_clk_get_possible_parent_response clk_get_possible_parent;
+		/** @endcond DEPRECATED */
 		struct cmd_clk_get_all_info_response clk_get_all_info;
 		struct cmd_clk_get_max_clk_id_response clk_get_max_clk_id;
 		struct cmd_clk_get_fmax_at_vmin_response clk_get_fmax_at_vmin;
 	} BPMP_UNION_ANON;
 } BPMP_ABI_PACKED;
 
-/** @} */
+/** @} Clocks */
 
 /**
  * @ingroup MRQ_Codes
@@ -1566,107 +1473,20 @@ struct mrq_query_abi_response {
 } BPMP_ABI_PACKED;
 
 /**
- * @ingroup MRQ_Codes
- * @def MRQ_PG_READ_STATE
- * @brief Read the power-gating state of a partition
  *
- * * Platforms: T186
- * @cond bpmp_t186
- * * Initiators: Any
- * * Targets: BPMP
- * * Request Payload: @ref mrq_pg_read_state_request
- * * Response Payload: @ref mrq_pg_read_state_response
- */
-
-/**
- * @ingroup Powergating
- * @brief Request with #MRQ_PG_READ_STATE
- *
- * Used by MRQ_PG_READ_STATE call to read the current state of a
- * partition.
- */
-struct mrq_pg_read_state_request {
-	/** @brief ID of partition */
-	uint32_t partition_id;
-} BPMP_ABI_PACKED;
-
-/**
- * @ingroup Powergating
- * @brief Response to MRQ_PG_READ_STATE
- * @todo define possible errors.
- */
-struct mrq_pg_read_state_response {
-	/** @brief Read as don't care */
-	uint32_t sram_state;
-	/** @brief State of power partition
-	 * * 0 : off
-	 * * 1 : on
-	 */
-	uint32_t logic_state;
-} BPMP_ABI_PACKED;
-/** @endcond*/
-/** @} */
-
-/**
- * @ingroup MRQ_Codes
- * @def MRQ_PG_UPDATE_STATE
- * @brief Modify the power-gating state of a partition. In contrast to
- * MRQ_PG calls, the operations that change state (on/off) of power
- * partition are reference counted.
- *
- * * Platforms: T186
- * @cond bpmp_t186
- * * Initiators: Any
- * * Targets: BPMP
- * * Request Payload: @ref mrq_pg_update_state_request
- * * Response Payload: N/A
- */
-
-/**
- * @ingroup Powergating
- * @brief Request with mrq_pg_update_state_request
- *
- * Used by #MRQ_PG_UPDATE_STATE call to request BPMP to change the
- * state of a power partition #partition_id.
- */
-struct mrq_pg_update_state_request {
-	/** @brief ID of partition */
-	uint32_t partition_id;
-	/** @brief Secondary control of power partition
-	 *  @details Ignored by many versions of the BPMP
-	 *  firmware. For maximum compatibility, set the value
-	 *  according to @ref logic_state
-	 * *  0x1: power ON partition (@ref logic_state == 0x3)
-	 * *  0x3: power OFF partition (@ref logic_state == 0x1)
-	 */
-	uint32_t sram_state;
-	/** @brief Controls state of power partition, legal values are
-	 * *  0x1 : power OFF partition
-	 * *  0x3 : power ON partition
-	 */
-	uint32_t logic_state;
-	/** @brief Change state of clocks of the power partition, legal values
-	 * *  0x0 : do not change clock state
-	 * *  0x1 : disable partition clocks (only applicable when
-	 *          @ref logic_state == 0x1)
-	 * *  0x3 : enable partition clocks (only applicable when
-	 *          @ref logic_state == 0x3)
-	 */
-	uint32_t clock_state;
-} BPMP_ABI_PACKED;
-/** @endcond*/
-
-/**
  * @ingroup MRQ_Codes
  * @def MRQ_PG
  * @brief Control power-gating state of a partition. In contrast to
  * MRQ_PG_UPDATE_STATE, operations that change the power partition
  * state are NOT reference counted
  *
- * @note BPMP-FW forcefully turns off some partitions as part of SC7 entry
- * because their state cannot be adequately restored on exit. Therefore,
- * it is recommended to power off all domains via MRQ_PG prior to SC7 entry.
+ * @cond (bpmp_t194 || bpmp_t186)
+ * @note On T194 and earlier BPMP-FW forcefully turns off some partitions as
+ * part of SC7 entry because their state cannot be adequately restored on exit.
+ * Therefore, it is recommended to power off all domains via MRQ_PG prior to SC7
+ * entry.
  * See @ref bpmp_pdomain_ids for further detail.
+ * @endcond (bpmp_t194 || bpmp_t186)
  *
  * * Platforms: T186, T194
  * * Initiators: Any
@@ -1831,7 +1651,7 @@ struct mrq_pg_response {
 	} BPMP_UNION_ANON;
 } BPMP_ABI_PACKED;
 
-/** @} */
+/** @} Powergating */
 
 /**
  * @ingroup MRQ_Codes
@@ -2077,7 +1897,8 @@ union mrq_thermal_bpmp_to_host_response {
 	struct cmd_thermal_get_thermtrip_response get_thermtrip;
 	struct cmd_thermal_get_num_zones_response get_num_zones;
 } BPMP_ABI_PACKED;
-/** @} */
+
+/** @} Thermal */
 
 /**
  * @ingroup MRQ_Codes
@@ -2111,8 +1932,9 @@ struct mrq_oc_status_response {
 	uint8_t throt_en[OC_STATUS_MAX_SIZE];
 	uint32_t event_cnt[OC_STATUS_MAX_SIZE];
 } BPMP_ABI_PACKED;
-/** @endcond */
-/** @} */
+
+/** @} OC_status */
+/** @endcond bpmp_t234 */
 
 /**
  * @ingroup MRQ_Codes
@@ -2171,8 +1993,9 @@ struct cpu_vhint_data {
 	/** reserved for future use */
 	uint16_t reserved[328];
 } BPMP_ABI_PACKED;
-/** @endcond */
-/** @} */
+
+/** @} Vhint */
+/** @endcond bpmp_t186 */
 
 /**
  * @ingroup MRQ_Codes
@@ -2239,7 +2062,8 @@ struct mrq_abi_ratchet_response {
 	/** @brief BPMP's ratchet value */
 	uint16_t ratchet;
 };
-/** @} */
+
+/** @} ABI_info */
 
 /**
  * @ingroup MRQ_Codes
@@ -2276,7 +2100,7 @@ struct mrq_emc_dvfs_latency_response {
 	struct emc_dvfs_latency pairs[EMC_DVFS_LATENCY_MAX_SIZE];
 } BPMP_ABI_PACKED;
 
-/** @} */
+/** @} EMC */
 
 /**
  * @ingroup MRQ_Codes
@@ -2284,7 +2108,7 @@ struct mrq_emc_dvfs_latency_response {
  * @brief Query EMC HUB frequencies
  *
  * * Platforms: T234 onwards
- * @cond bpmp_t234
+ * @cond (bpmp_t234 || bpmp_t239 || bpmp_th500)
  * * Initiators: CCPLEX
  * * Targets: BPMP
  * * Request Payload: N/A
@@ -2314,8 +2138,8 @@ struct mrq_emc_dvfs_emchub_response {
 	struct emc_dvfs_emchub pairs[EMC_DVFS_EMCHUB_MAX_SIZE];
 } BPMP_ABI_PACKED;
 
-/** @} */
-/** @endcond */
+/** @} EMC */
+/** @endcond (bpmp_t234 || bpmp_t239 || bpmp_th500) */
 
 /**
  * @ingroup MRQ_Codes
@@ -2323,11 +2147,12 @@ struct mrq_emc_dvfs_emchub_response {
  * @brief Set EMC display RFL handshake mode of operations
  *
  * * Platforms: T234 onwards
- * @cond bpmp_t234
+ * @cond (bpmp_t234 || bpmp_t239 || bpmp_th500)
  * * Initiators: CCPLEX
  * * Targets: BPMP
  * * Request Payload: @ref mrq_emc_disp_rfl_request
  * * Response Payload: N/A
+ *
  * @addtogroup EMC
  * @{
  */
@@ -2358,8 +2183,8 @@ struct mrq_emc_disp_rfl_request {
 	uint32_t mode;
 } BPMP_ABI_PACKED;
 
-/** @} */
-/** @endcond */
+/** @} EMC */
+/** @endcond (bpmp_t234 || bpmp_t239 || bpmp_th500) */
 
 /**
  * @ingroup MRQ_Codes
@@ -2367,7 +2192,7 @@ struct mrq_emc_disp_rfl_request {
  * @brief bwmgr requests
  *
  * * Platforms: T234 onwards
- * @cond bpmp_t234
+ * @cond (bpmp_t234 || bpmp_t239 || bpmp_th500)
  * * Initiators: CCPLEX
  * * Targets: BPMP
  * * Request Payload: @ref mrq_bwmgr_request
@@ -2473,8 +2298,8 @@ struct mrq_bwmgr_response {
 	} BPMP_UNION_ANON;
 } BPMP_ABI_PACKED;
 
-/** @endcond */
-/** @} */
+/** @} BWMGR */
+/** @endcond (bpmp_t234 || bpmp_t239 || bpmp_th500) */
 
 /**
  * @ingroup MRQ_Codes
@@ -2482,14 +2307,13 @@ struct mrq_bwmgr_response {
  * @brief bpmp-integrated bwmgr requests
  *
  * * Platforms: T234 onwards
- * @cond bpmp_t234
+ * @cond (bpmp_t234 || bpmp_t239 || bpmp_th500)
  * * Initiators: CCPLEX
  * * Targets: BPMP
  * * Request Payload: @ref mrq_bwmgr_int_request
  * * Response Payload: @ref mrq_bwmgr_int_response
  *
  * @addtogroup BWMGR_INT
- *
  * @{
  */
 
@@ -2546,7 +2370,8 @@ struct cmd_bwmgr_int_query_abi_request {
 #define BWMGR_INT_UNIT_KBPS  0U
 /** @brief kilohertz unit-type */
 #define BWMGR_INT_UNIT_KHZ   1U
-/** @} */
+
+/** @} bwmgr_int_unit_type */
 
 /*
  * request data for request type CMD_BWMGR_INT_CALC_AND_SET
@@ -2619,8 +2444,8 @@ struct mrq_bwmgr_int_response {
 	} BPMP_UNION_ANON;
 } BPMP_ABI_PACKED;
 
-/** @endcond */
-/** @} */
+/** @} BWMGR_INT */
+/** @endcond (bpmp_t234 || bpmp_t239 || bpmp_th500) */
 
 /**
  * @ingroup MRQ_Codes
@@ -2628,7 +2453,7 @@ struct mrq_bwmgr_int_response {
  * @brief ISO client requests
  *
  * * Platforms: T234 onwards
- * @cond bpmp_t234
+ * @cond (bpmp_t234 || bpmp_t239 || bpmp_th500)
  * * Initiators: CCPLEX
  * * Targets: BPMP
  * * Request Payload: @ref mrq_iso_client_request
@@ -2810,8 +2635,8 @@ struct mrq_iso_client_response {
 	} BPMP_UNION_ANON;
 } BPMP_ABI_PACKED;
 
-/** @endcond */
-/** @} */
+/** @} ISO_CLIENT */
+/** @endcond (bpmp_t234 || bpmp_t239 || bpmp_th500) */
 
 /**
  * @ingroup MRQ_Codes
@@ -2819,7 +2644,7 @@ struct mrq_iso_client_response {
  * @brief CPU freq. limits in ndiv
  *
  * * Platforms: T194 onwards
- * @cond bpmp_t194
+ * @cond (bpmp_t194 || bpmp_t234 || bpmp_t239 || bpmp_th500)
  * * Initiators: CCPLEX
  * * Targets: BPMP
  * * Request Payload: @ref mrq_cpu_ndiv_limits_request
@@ -2852,8 +2677,8 @@ struct mrq_cpu_ndiv_limits_response {
 	uint16_t ndiv_min;
 } BPMP_ABI_PACKED;
 
-/** @} */
-/** @endcond */
+/** @} CPU */
+/** @endcond (bpmp_t194 || bpmp_t234 || bpmp_t239 || bpmp_th500) */
 
 /**
  * @ingroup MRQ_Codes
@@ -2898,40 +2723,8 @@ struct mrq_cpu_auto_cc3_response {
 	uint32_t auto_cc3_config;
 } BPMP_ABI_PACKED;
 
-/** @} */
-/** @endcond */
-
-/**
- * @ingroup MRQ_Codes
- * @def MRQ_TRACE_ITER
- * @brief Manage the trace iterator
- *
- * @deprecated
- *
- * * Platforms: All
- * * Initiators: CCPLEX
- * * Targets: BPMP
- * * Request Payload: N/A
- * * Response Payload: @ref mrq_trace_iter_request
- * @addtogroup Trace
- * @{
- */
-enum {
-	/** @brief (re)start the tracing now. Ignore older events */
-	TRACE_ITER_INIT = 0,
-	/** @brief Clobber all events in the trace buffer */
-	TRACE_ITER_CLEAN = 1
-};
-
-/**
- * @brief Request with #MRQ_TRACE_ITER
- */
-struct mrq_trace_iter_request {
-	/** @brief TRACE_ITER_INIT or TRACE_ITER_CLEAN */
-	uint32_t cmd;
-} BPMP_ABI_PACKED;
-
-/** @} */
+/** @} CC3 */
+/** @endcond bpmp_t194 */
 
 /**
  * @ingroup MRQ_Codes
@@ -3109,7 +2902,8 @@ union mrq_ringbuf_console_bpmp_to_host_response {
 	struct cmd_ringbuf_console_write_resp write;
 	struct cmd_ringbuf_console_get_fifo_resp get_fifo;
 } BPMP_ABI_PACKED;
-/** @} */
+
+/** @} RingbufConsole */
 
 /**
  * @ingroup MRQ_Codes
@@ -3117,7 +2911,7 @@ union mrq_ringbuf_console_bpmp_to_host_response {
  * @brief Set a strap value controlled by BPMP
  *
  * * Platforms: T194 onwards
- * @cond (bpmp_t194 || bpmp_t234)
+ * @cond (bpmp_t194 || bpmp_t234 || bpmp_t239 || bpmp_th500)
  * * Initiators: CCPLEX
  * * Targets: BPMP
  * * Request Payload: @ref mrq_strap_request
@@ -3148,17 +2942,14 @@ enum mrq_strap_cmd {
 struct mrq_strap_request {
 	/** @brief @ref mrq_strap_cmd */
 	uint32_t cmd;
-	/** @brief Strap ID from @ref Strap_Ids */
+	/** @brief Strap ID from @ref Strap_Identifiers */
 	uint32_t id;
 	/** @brief Desired value for strap (if cmd is #STRAP_SET) */
 	uint32_t value;
 } BPMP_ABI_PACKED;
 
-/**
- * @defgroup Strap_Ids Strap Identifiers
- * @}
- */
-/** @endcond */
+/** @} Strap */
+/** @endcond (bpmp_t194 || bpmp_t234 || bpmp_t239 || bpmp_th500) */
 
 /**
  * @ingroup MRQ_Codes
@@ -3166,7 +2957,7 @@ struct mrq_strap_request {
  * @brief Perform a UPHY operation
  *
  * * Platforms: T194 onwards
- * @cond (bpmp_t194 || bpmp_t234 || bpmp_t239)
+ * @cond (bpmp_t194 || bpmp_t234 || bpmp_t239 || bpmp_th500)
  * * Initiators: CCPLEX
  * * Targets: BPMP
  * * Request Payload: @ref mrq_uphy_request
@@ -3292,8 +3083,8 @@ struct mrq_uphy_response {
 	} BPMP_UNION_ANON;
 } BPMP_ABI_PACKED;
 
-/** @} */
-/** @endcond */
+/** @} UPHY */
+/** @endcond (bpmp_t194 || bpmp_t234 || bpmp_t239 || bpmp_th500) */
 
 /**
  * @ingroup MRQ_Codes
@@ -3301,14 +3092,16 @@ struct mrq_uphy_response {
  * @brief Perform a frequency monitor configuration operations
  *
  * * Platforms: T194 onwards
- * @cond (bpmp_t194 || bpmp_t234)
+ * @cond (bpmp_t194 || bpmp_t234 || bpmp_t239 || bpmp_th500)
  * * Initiators: CCPLEX
  * * Targets: BPMP
  * * Request Payload: @ref mrq_fmon_request
  * * Response Payload: @ref mrq_fmon_response
+ * @endcond (bpmp_t194 || bpmp_t234 || bpmp_t239 || bpmp_th500)
  *
  * @addtogroup FMON
  * @{
+ * @cond (bpmp_t194 || bpmp_t234)
  */
 enum {
 	/**
@@ -3383,7 +3176,8 @@ enum {
  * Kept for backward compatibility
  */
 #define CMD_FMON_NUM		4
-/** @endcond */
+
+/** @endcond DEPRECATED */
 
 /**
  * @defgroup fmon_fault_type FMON fault type
@@ -3396,7 +3190,9 @@ enum {
 #define FMON_FAULT_TYPE_HW		1U
 /** @brief FMON faults detected by s/w */
 #define FMON_FAULT_TYPE_SW		2U
-/** @} */
+
+/** @} fmon_fault_type */
+
 
 struct cmd_fmon_gear_clamp_request {
 	int32_t unused;
@@ -3452,7 +3248,6 @@ struct cmd_fmon_fault_sts_get_response {
  * |CMD_FMON_FAULT_STS_GET      |fmon_fault_sts_get     |
  *
  */
-
 struct mrq_fmon_request {
 	/** @brief Sub-command and clock id concatenated to 32-bit word.
 	 * - bits[31..24] is the sub-cmd.
@@ -3498,8 +3293,8 @@ struct mrq_fmon_response {
 	} BPMP_UNION_ANON;
 } BPMP_ABI_PACKED;
 
-/** @} */
-/** @endcond */
+/** @endcond (bpmp_t194 || bpmp_t234) */
+/** @} FMON */
 
 /**
  * @ingroup MRQ_Codes
@@ -3516,8 +3311,10 @@ struct mrq_fmon_response {
  *
  * @note This MRQ ABI is under construction, and subject to change
  *
+ * @endcond bpmp_t194
  * @addtogroup EC
  * @{
+ * @cond bpmp_t194
  */
 enum {
 	/**
@@ -3528,7 +3325,7 @@ enum {
 	 * -#BPMP_ENODEV if target EC is not owned by BPMP @n
 	 * -#BPMP_EACCES if target EC power domain is turned off @n
 	 * -#BPMP_EBADCMD if subcommand is not supported
-	 * @endcond
+	 * @endcond DEPRECATED
 	 */
 	CMD_EC_STATUS_GET = 1,	/* deprecated */
 
@@ -3639,7 +3436,8 @@ enum ec_registers_group {
 #define EC_STATUS_FLAG_LAST_ERROR	0x0002U
 /** @brief EC latent error flag */
 #define EC_STATUS_FLAG_LATENT_ERROR	0x0004U
-/** @} */
+
+/** @} bpmp_ec_status_flags */
 
 /**
  * @defgroup bpmp_ec_desc_flags EC Descriptor Flags
@@ -3650,7 +3448,8 @@ enum ec_registers_group {
 #define EC_DESC_FLAG_RESOLVED		0x0001U
 /** @brief EC descriptor failed to retrieve id flag */
 #define EC_DESC_FLAG_NO_ID		0x0002U
-/** @} */
+
+/** @} bpmp_ec_desc_flags */
 
 /**
  * |error type                       | fmon_clk_id values        |
@@ -3662,14 +3461,18 @@ struct ec_err_fmon_desc {
 	uint16_t desc_flags;
 	/** @brief FMON monitored clock id */
 	uint16_t fmon_clk_id;
-	/** @brief Bitmask of @ref bpmp_fmon_faults_flags */
+	/**
+	 * @brief Bitmask of fault flags
+	 *
+	 * @ref bpmp_fmon_faults_flags
+	 */
 	uint32_t fmon_faults;
 	/** @brief FMON faults access error */
 	int32_t fmon_access_error;
 } BPMP_ABI_PACKED;
 
 /**
- * |error type                       | vmon_adc_id values        |
+ * | error type                      | vmon_adc_id values        |
  * |---------------------------------|---------------------------|
  * |@ref EC_ERR_TYPE_VOLTAGE_MONITOR |@ref bpmp_adc_ids          |
  */
@@ -3678,16 +3481,16 @@ struct ec_err_vmon_desc {
 	uint16_t desc_flags;
 	/** @brief VMON rail adc id */
 	uint16_t vmon_adc_id;
-	/** @brief Bitmask of @ref bpmp_vmon_faults_flags */
+	/** @brief Bitmask of bpmp_vmon_faults_flags */
 	uint32_t vmon_faults;
 	/** @brief VMON faults access error */
 	int32_t vmon_access_error;
 } BPMP_ABI_PACKED;
 
 /**
- * |error type                       | reg_id values             |
- * |---------------------------------|---------------------------|
- * |@ref EC_ERR_TYPE_REGISTER_PARITY |@ref bpmp_ec_registers_ids |
+ * |error type                       | reg_id values         |
+ * |---------------------------------|-----------------------|
+ * |@ref EC_ERR_TYPE_REGISTER_PARITY | bpmp_ec_registers_ids |
  */
 struct ec_err_reg_parity_desc {
 	/** @brief Bitmask of @ref bpmp_ec_desc_flags  */
@@ -3699,10 +3502,10 @@ struct ec_err_reg_parity_desc {
 } BPMP_ABI_PACKED;
 
 /**
- * |error type                        | err_source_id values     |
- * |--------------------------------- |--------------------------|
- * |@ref EC_ERR_TYPE_SW_CORRECTABLE   | @ref bpmp_ec_ce_swd_ids  |
- * |@ref EC_ERR_TYPE_SW_UNCORRECTABLE | @ref bpmp_ec_ue_swd_ids  |
+ * |error type                        | err_source_id values |
+ * |--------------------------------- |----------------------|
+ * |@ref EC_ERR_TYPE_SW_CORRECTABLE   | bpmp_ec_ce_swd_ids   |
+ * |@ref EC_ERR_TYPE_SW_UNCORRECTABLE | bpmp_ec_ue_swd_ids   |
  */
 struct ec_err_sw_error_desc {
 	/** @brief Bitmask of @ref bpmp_ec_desc_flags  */
@@ -3714,15 +3517,15 @@ struct ec_err_sw_error_desc {
 } BPMP_ABI_PACKED;
 
 /**
- * |error type                              | err_source_id values      |
- * |----------------------------------------|---------------------------|
- * |@ref EC_ERR_TYPE_PARITY_INTERNAL        |@ref bpmp_ec_ipath_ids     |
- * |@ref EC_ERR_TYPE_ECC_SEC_INTERNAL       |@ref bpmp_ec_ipath_ids     |
- * |@ref EC_ERR_TYPE_ECC_DED_INTERNAL       |@ref bpmp_ec_ipath_ids     |
- * |@ref EC_ERR_TYPE_COMPARATOR             |@ref bpmp_ec_comparator_ids|
- * |@ref EC_ERR_TYPE_PARITY_SRAM            |@ref bpmp_clock_ids        |
- * |@ref EC_ERR_TYPE_OTHER_HW_CORRECTABLE   |@ref bpmp_ec_misc_hwd_ids  |
- * |@ref EC_ERR_TYPE_OTHER_HW_UNCORRECTABLE |@ref bpmp_ec_misc_hwd_ids  |
+ * |error type                              | err_source_id values   |
+ * |----------------------------------------|------------------------|
+ * |@ref EC_ERR_TYPE_PARITY_INTERNAL        |  bpmp_ec_ipath_ids     |
+ * |@ref EC_ERR_TYPE_ECC_SEC_INTERNAL       |  bpmp_ec_ipath_ids     |
+ * |@ref EC_ERR_TYPE_ECC_DED_INTERNAL       |  bpmp_ec_ipath_ids     |
+ * |@ref EC_ERR_TYPE_COMPARATOR             |  bpmp_ec_comparator_ids|
+ * |@ref EC_ERR_TYPE_OTHER_HW_CORRECTABLE   |  bpmp_ec_misc_hwd_ids  |
+ * |@ref EC_ERR_TYPE_OTHER_HW_UNCORRECTABLE |  bpmp_ec_misc_hwd_ids  |
+ * |@ref EC_ERR_TYPE_PARITY_SRAM            |  bpmp_clock_ids        |
  */
 struct ec_err_simple_desc {
 	/** @brief Bitmask of @ref bpmp_ec_desc_flags  */
@@ -3769,7 +3572,7 @@ struct cmd_ec_status_get_response {
 	/** @brief  EC error descriptors */
 	union ec_err_desc error_descs[EC_ERR_STATUS_DESC_MAX_NUM];
 } BPMP_ABI_PACKED;
-/** @endcond */
+/** @endcond DEPRECATED */
 
 struct cmd_ec_status_ex_get_response {
 	/** @brief Target EC id (the same id received with request). */
@@ -3807,7 +3610,7 @@ struct cmd_ec_status_ex_get_response {
  * |sub-command                 |payload                |
  * |----------------------------|-----------------------|
  * |@ref CMD_EC_STATUS_GET      |ec_status_get          |
- * @endcond
+ * @endcond DEPRECATED
  *
  * |sub-command                 |payload                |
  * |----------------------------|-----------------------|
@@ -3835,7 +3638,7 @@ struct mrq_ec_request {
  * |sub-command                 |payload                 |
  * |----------------------------|------------------------|
  * |@ref CMD_EC_STATUS_GET      |ec_status_get           |
- * @endcond
+ * @endcond DEPRECATED
  *
  * |sub-command                 |payload                 |
  * |----------------------------|------------------------|
@@ -3849,13 +3652,13 @@ struct mrq_ec_response {
 		 * @cond DEPRECATED
 		 */
 		struct cmd_ec_status_get_response ec_status_get;
-		/** @endcond */
+		/** @endcond DEPRECATED */
 		struct cmd_ec_status_ex_get_response ec_status_ex_get;
 	} BPMP_UNION_ANON;
 } BPMP_ABI_PACKED;
 
-/** @} */
-/** @endcond */
+/** @endcond bpmp_t194 */
+/** @} EC */
 
 /**
  * @ingroup MRQ_Codes
@@ -3888,8 +3691,8 @@ struct mrq_telemetry_response {
 	uint64_t data_buf_addr;	/**< see @ref bpmp_telemetry_layout */
 } BPMP_ABI_PACKED;
 
-/** @} */
-/** @endcond */
+/** @} Telemetry */
+/** @endcond bpmp_th500 */
 
 /**
  * @ingroup MRQ_Codes
@@ -3930,13 +3733,22 @@ enum mrq_pwr_limit_cmd {
 	/**
 	 * @brief Get power limit setting
 	 *
-	* mrq_response:err is
-	* * 0: Success
-	* * -#BPMP_ENODEV: Pwr limit mrq is not supported by BPMP-FW
-	* * -#BPMP_ENAVAIL: Invalid request parameters
-	* * -#BPMP_EACCES: Request is not accepted
+	 * mrq_response:err is
+	 * * 0: Success
+	 * * -#BPMP_ENODEV: Pwr limit mrq is not supported by BPMP-FW
+	 * * -#BPMP_ENAVAIL: Invalid request parameters
 	 */
 	CMD_PWR_LIMIT_GET = 2,
+
+	/**
+	 * @brief Get current power cap
+	 *
+	 * mrq_response:err is
+	 * * 0: Success
+	 * * -#BPMP_ENODEV: Pwr limit mrq is not supported by BPMP-FW
+	 * * -#BPMP_ENAVAIL: Invalid request parameters
+	 */
+	CMD_PWR_LIMIT_CURR_CAP = 3,
 };
 
 /**
@@ -3951,7 +3763,8 @@ enum mrq_pwr_limit_cmd {
 #define PWR_LIMIT_TYPE_BOUND_MIN		2U
 /** @brief Number of limit types supported by mrq interface */
 #define PWR_LIMIT_TYPE_NUM			3U
-/** @} */
+
+/** @} bpmp_pwr_limit_type */
 
 /**
  * @brief Request data for #MRQ_PWR_LIMIT command CMD_PWR_LIMIT_QUERY_ABI
@@ -3995,6 +3808,22 @@ struct cmd_pwr_limit_get_response {
 } BPMP_ABI_PACKED;
 
 /**
+ * @brief Request data for #MRQ_PWR_LIMIT command CMD_PWR_LIMIT_CURR_CAP
+ *
+ * For specified limit get current power cap aggregated from all sources.
+ */
+struct cmd_pwr_limit_curr_cap_request {
+	uint32_t limit_id;   /**< @ref bpmp_pwr_limit_id */
+} BPMP_ABI_PACKED;
+
+/**
+ * @brief Response data for #MRQ_PWR_LIMIT command CMD_PWR_LIMIT_CURR_CAP
+ */
+struct cmd_pwr_limit_curr_cap_response {
+	uint32_t curr_cap;
+} BPMP_ABI_PACKED;
+
+/**
  * @brief Request with #MRQ_PWR_LIMIT
  *
  * |sub-command                 |payload                          |
@@ -4002,6 +3831,7 @@ struct cmd_pwr_limit_get_response {
  * |CMD_PWR_LIMIT_QUERY_ABI     | cmd_pwr_limit_query_abi_request |
  * |CMD_PWR_LIMIT_SET           | cmd_pwr_limit_set_request       |
  * |CMD_PWR_LIMIT_GET           | cmd_pwr_limit_get_request       |
+ * |CMD_PWR_LIMIT_CURR_CAP      | cmd_pwr_limit_curr_cap_request  |
  */
 struct mrq_pwr_limit_request {
 	uint32_t cmd;
@@ -4009,6 +3839,7 @@ struct mrq_pwr_limit_request {
 		struct cmd_pwr_limit_query_abi_request pwr_limit_query_abi_req;
 		struct cmd_pwr_limit_set_request pwr_limit_set_req;
 		struct cmd_pwr_limit_get_request pwr_limit_get_req;
+		struct cmd_pwr_limit_curr_cap_request pwr_limit_curr_cap_req;
 	} BPMP_UNION_ANON;
 } BPMP_ABI_PACKED;
 
@@ -4020,12 +3851,18 @@ struct mrq_pwr_limit_request {
  * |CMD_PWR_LIMIT_QUERY_ABI     | -                               |
  * |CMD_PWR_LIMIT_SET           | -                               |
  * |CMD_PWR_LIMIT_GET           | cmd_pwr_limit_get_response      |
+ * |CMD_PWR_LIMIT_CURR_CAP      | cmd_pwr_limit_curr_cap_response |
  */
 struct mrq_pwr_limit_response {
 	union {
 		struct cmd_pwr_limit_get_response pwr_limit_get_rsp;
+		struct cmd_pwr_limit_curr_cap_response pwr_limit_curr_cap_rsp;
 	} BPMP_UNION_ANON;
 } BPMP_ABI_PACKED;
+
+/** @} PwrLimit */
+/** @endcond bpmp_th500 */
+
 
 /**
  * @ingroup MRQ_Codes
@@ -4071,11 +3908,8 @@ struct mrq_gears_response {
 	uint32_t ncpu[16];
 } BPMP_ABI_PACKED;
 
-/** @} */
-/** @endcond */
-
-/** @} */
-/** @endcond */
+/** @} Gears */
+/** @endcond bpmp_th500 */
 
 /**
  * @addtogroup Error_Codes
@@ -4130,7 +3964,7 @@ struct mrq_gears_response {
 /** @brief No such device or address */
 #define BPMP_ENXIO	140
 
-/** @} */
+/** @} Error_Codes */
 
 #if defined(BPMP_ABI_CHECKS)
 #include "bpmp_abi_checks.h"

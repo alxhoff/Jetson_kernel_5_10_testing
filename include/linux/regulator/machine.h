@@ -30,7 +30,6 @@ struct regulator;
  * STATUS:   Regulator can be enabled and disabled.
  * DRMS:     Dynamic Regulator Mode Switching is enabled for this regulator.
  * BYPASS:   Regulator can be put into bypass mode
- * CONTROL:  Dynamic change control mode of Regulator i.e I2C or PWM.
  */
 
 #define REGULATOR_CHANGE_VOLTAGE	0x1
@@ -39,7 +38,6 @@ struct regulator;
 #define REGULATOR_CHANGE_STATUS		0x8
 #define REGULATOR_CHANGE_DRMS		0x10
 #define REGULATOR_CHANGE_BYPASS		0x20
-#define REGULATOR_CHANGE_CONTROL	0x40
 
 /*
  * operations in suspend mode
@@ -85,6 +83,14 @@ struct regulator_state {
 	bool changeable;
 };
 
+#define REGULATOR_NOTIF_LIMIT_DISABLE -1
+#define REGULATOR_NOTIF_LIMIT_ENABLE -2
+struct notification_limit {
+	int prot;
+	int err;
+	int warn;
+};
+
 /**
  * struct regulation_constraints - regulator operating constraints.
  *
@@ -94,7 +100,6 @@ struct regulator_state {
  *
  * @min_uV: Smallest voltage consumers may set.
  * @max_uV: Largest voltage consumers may set.
- * @init_uV: Initial voltage consumers may set.
  * @uV_offset: Offset applied to voltages from consumer to compensate for
  *             voltage drops.
  *
@@ -102,6 +107,11 @@ struct regulator_state {
  * @max_uA: Largest current consumers may set.
  * @ilim_uA: Maximum input current.
  * @system_load: Load that isn't captured by any consumer requests.
+ *
+ * @over_curr_limits:		Limits for acting on over current.
+ * @over_voltage_limits:	Limits for acting on over voltage.
+ * @under_voltage_limits:	Limits for acting on under voltage.
+ * @temp_limits:		Limits for acting on over temperature.
  *
  * @max_spread: Max possible spread between coupled regulators
  * @max_uV_step: Max possible step change in voltage
@@ -118,6 +128,11 @@ struct regulator_state {
  * @soft_start: Enable soft start so that voltage ramps slowly.
  * @pull_down: Enable pull down when regulator is disabled.
  * @over_current_protection: Auto disable on over current event.
+ *
+ * @over_current_detection: Configure over current limits.
+ * @over_voltage_detection: Configure over voltage limits.
+ * @under_voltage_detection: Configure under voltage limits.
+ * @over_temp_detection: Configure over temperature limits.
  *
  * @input_uV: Input voltage for regulator when supplied by another regulator.
  *
@@ -146,7 +161,6 @@ struct regulation_constraints {
 	/* voltage output range (inclusive) - for voltage control */
 	int min_uV;
 	int max_uV;
-	int init_uV;
 
 	int uV_offset;
 
@@ -176,13 +190,14 @@ struct regulation_constraints {
 	struct regulator_state state_disk;
 	struct regulator_state state_mem;
 	struct regulator_state state_standby;
+	struct notification_limit over_curr_limits;
+	struct notification_limit over_voltage_limits;
+	struct notification_limit under_voltage_limits;
+	struct notification_limit temp_limits;
 	suspend_state_t initial_state; /* suspend state to set at init */
 
 	/* mode to set on startup */
 	unsigned int initial_mode;
-
-	/* mode to be set on sleep mode */
-	unsigned int sleep_mode;
 
 	unsigned int ramp_delay;
 	unsigned int settling_time;
@@ -200,7 +215,10 @@ struct regulation_constraints {
 	unsigned soft_start:1;	/* ramp voltage slowly */
 	unsigned pull_down:1;	/* pull down resistor when regulator off */
 	unsigned over_current_protection:1; /* auto disable on over current */
-	unsigned bypass_on:1;	/* Bypass ON */
+	unsigned over_current_detection:1; /* notify on over current */
+	unsigned over_voltage_detection:1; /* notify on over voltage */
+	unsigned under_voltage_detection:1; /* notify on under voltage */
+	unsigned over_temp_detection:1; /* notify on over temperature */
 };
 
 /**

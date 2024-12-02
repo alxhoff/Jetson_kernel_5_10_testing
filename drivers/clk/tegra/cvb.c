@@ -2,13 +2,13 @@
 /*
  * Utility functions for parsing Tegra CVB voltage tables
  *
- * Copyright (C) 2012-2020 NVIDIA Corporation.  All rights reserved.
+ * Copyright (C) 2012-2019 NVIDIA Corporation.  All rights reserved.
  */
 #include <linux/err.h>
 #include <linux/kernel.h>
 #include <linux/pm_opp.h>
 
-#include <soc/tegra/cvb.h>
+#include "cvb.h"
 
 /* cvb_mv = ((c2 * speedo / s_scale + c1) * speedo / s_scale + c0) */
 static inline int get_cvb_voltage(int speedo, int s_scale,
@@ -19,25 +19,6 @@ static inline int get_cvb_voltage(int speedo, int s_scale,
 	/* apply only speedo scale: output mv = cvb_mv * v_scale */
 	mv = DIV_ROUND_CLOSEST(cvb->c2 * speedo, s_scale);
 	mv = DIV_ROUND_CLOSEST((mv + cvb->c1) * speedo, s_scale) + cvb->c0;
-	return mv;
-}
-
-int tegra_get_cvb_voltage(int speedo, int s_scale,
-			  const struct cvb_coefficients *cvb)
-{
-	return get_cvb_voltage(speedo, s_scale, cvb);
-}
-
-/* cvb_t_mv = ((c3 * speedo / s_scale + c4 + c5 * T / t_scale) * T / t_scale) / v_scale */
-int tegra_get_cvb_t_voltage(int speedo, int s_scale, int t, int t_scale,
-			    struct cvb_coefficients *cvb)
-{
-	/* apply speedo & temperature scales: output mv = cvb_t_mv * v_scale */
-	int mv;
-
-	mv = DIV_ROUND_CLOSEST(cvb->c3 * speedo, s_scale) + cvb->c4 +
-		DIV_ROUND_CLOSEST(cvb->c5 * t, t_scale);
-	mv = DIV_ROUND_CLOSEST(mv * t, t_scale);
 	return mv;
 }
 
@@ -52,12 +33,6 @@ static int round_cvb_voltage(int mv, int v_scale,
 	uv = max(mv * 1000, offset) - offset;
 	uv = DIV_ROUND_UP(uv, step) * align->step_uv + align->offset_uv;
 	return uv / 1000;
-}
-
-int tegra_round_cvb_voltage(int mv, int v_scale,
-			    const struct rail_alignment *align)
-{
-	return round_cvb_voltage(mv, v_scale, align);
 }
 
 enum {
@@ -77,43 +52,14 @@ static int round_voltage(int mv, const struct rail_alignment *align, int up)
 	return mv;
 }
 
-int tegra_round_voltage(int mv, const struct rail_alignment *align, int up)
-{
-	return round_voltage(mv, align, up);
-}
-
-/**
- * cvb_t_mv =
- * ((c2 * speedo / s_scale + c1) * speedo / s_scale + c0) +
- * ((c3 * speedo / s_scale + c4 + c5 * T / t_scale) * T / t_scale)
- */
-static inline int get_cvb_thermal_floor(int speedo, int temp,
-					int s_scale, int t_scale,
-					const struct thermal_coefficients *coef)
-{
-	int cvb_mv, mv;
-
-	cvb_mv = tegra_get_cvb_voltage(speedo, s_scale, &coef->cvb_coef);
-
-	mv = DIV_ROUND_CLOSEST(coef->c3 * speedo, s_scale) + coef->c4 +
-		DIV_ROUND_CLOSEST(coef->c5 * temp, t_scale);
-	mv = DIV_ROUND_CLOSEST(mv * temp, t_scale) + cvb_mv;
-	return mv;
-}
-
 static int build_opp_table(struct device *dev, const struct cvb_table *table,
 			   struct rail_alignment *align,
-			   int speedo_value, unsigned long max_freq, int *vmin)
+			   int speedo_value, unsigned long max_freq)
 {
 	int i, ret, dfll_mv, min_mv, max_mv;
 
 	min_mv = round_voltage(table->min_millivolts, align, UP);
 	max_mv = round_voltage(table->max_millivolts, align, DOWN);
-
-	dfll_mv = tegra_get_cvb_voltage(speedo_value, table->speedo_scale,
-					&table->vmin_coefficients);
-	dfll_mv = tegra_round_cvb_voltage(dfll_mv, table->voltage_scale, align);
-	min_mv = max(min_mv, dfll_mv);
 
 	for (i = 0; i < MAX_DVFS_FREQS; i++) {
 		const struct cvb_table_freq_entry *entry = &table->entries[i];
@@ -132,9 +78,6 @@ static int build_opp_table(struct device *dev, const struct cvb_table *table,
 			return ret;
 	}
 
-	if (vmin)
-		*vmin = min_mv;
-
 	return 0;
 }
 
@@ -143,11 +86,11 @@ static int build_opp_table(struct device *dev, const struct cvb_table *table,
  * @dev: the struct device * for which the OPP table is built
  * @tables: array of CVB tables
  * @count: size of the previously mentioned array
+ * @align: parameters of the regulator step and offset
  * @process_id: process id of the HW module
  * @speedo_id: speedo id of the HW module
  * @speedo_value: speedo value of the HW module
  * @max_freq: highest safe clock rate
- * @vmin: final minimum voltage returned to the caller
  *
  * On Tegra, a CVB table encodes the relationship between operating voltage
  * and safe maximal frequency for a given module (e.g. GPU or CPU). This
@@ -160,7 +103,7 @@ const struct cvb_table *
 tegra_cvb_add_opp_table(struct device *dev, const struct cvb_table *tables,
 			size_t count, struct rail_alignment *align,
 			int process_id, int speedo_id, int speedo_value,
-			unsigned long max_freq, int *vmin)
+			unsigned long max_freq)
 {
 	size_t i;
 	int ret;
@@ -175,7 +118,7 @@ tegra_cvb_add_opp_table(struct device *dev, const struct cvb_table *tables,
 			continue;
 
 		ret = build_opp_table(dev, table, align, speedo_value,
-				      max_freq, vmin);
+				      max_freq);
 		return ret ? ERR_PTR(ret) : table;
 	}
 
@@ -196,42 +139,4 @@ void tegra_cvb_remove_opp_table(struct device *dev,
 
 		dev_pm_opp_remove(dev, entry->freq);
 	}
-}
-
-/**
- * tegra_cvb_build_thermal_table - build thermal table from Tegra CVB tables
- * @table: the hardware characterization thermal table
- * @speedo_value: speedo value of the HW module
- * @soc_min_mv: minimum voltage applied across all temperature ranges
- *
- * The minimum voltage for the IP blocks inside Tegra SoCs might depend on
- * the current temperature. This function calculates the voltage-thermal
- * relations according to the given coefficients.   Note that if the
- * coefficients are not defined, the fixed thermal floors in the @table will
- * be used.  Returns 0 on success or a negative error code on failure.
- */
-int tegra_cvb_build_thermal_table(const struct thermal_table *table,
-		int speedo_value, unsigned int soc_min_mv)
-{
-	int i;
-
-	if (!table)
-		return -EINVAL;
-
-	/* The vmin for the lowest trip point is fixed */
-	for (i = 1; i < table->thermal_floor_table_size; i++) {
-		unsigned int mv;
-
-		mv = get_cvb_thermal_floor(speedo_value,
-				table->thermal_floor_table[i-1].temp,
-				table->speedo_scale,
-				table->temp_scale,
-				&table->coefficients);
-		mv = DIV_ROUND_UP(mv, table->voltage_scale);
-		mv = max(mv, soc_min_mv);
-		table->thermal_floor_table[i].millivolts = max(mv,
-				table->thermal_floor_table[i].millivolts);
-	}
-
-	return 0;
 }

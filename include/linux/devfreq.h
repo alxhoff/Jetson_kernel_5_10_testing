@@ -5,7 +5,6 @@
  *
  * Copyright (C) 2011 Samsung Electronics
  *	MyungJoo Ham <myungjoo.ham@samsung.com>
- * Copyright (c) 2014, NVIDIA CORPORATION.  All rights reserved.
  */
 
 #ifndef __LINUX_DEVFREQ_H__
@@ -15,8 +14,6 @@
 #include <linux/notifier.h>
 #include <linux/pm_opp.h>
 #include <linux/pm_qos.h>
-
-#define DEVFREQ_NAME_LEN 16
 
 /* DEVFREQ governor name */
 #define DEVFREQ_GOV_SIMPLE_ONDEMAND	"simple_ondemand"
@@ -41,6 +38,7 @@ enum devfreq_timer {
 
 struct devfreq;
 struct devfreq_governor;
+struct thermal_cooling_device;
 
 /**
  * struct devfreq_dev_status - Data given from devfreq user device to
@@ -56,8 +54,6 @@ struct devfreq_governor;
  *			own protocol with private_data. However, because
  *			this is governor-specific, a governor using this
  *			will be only compatible with devices aware of it.
- * @busy:		The current status of the device; True if the
- *			device is busy, false if it is not.
  */
 struct devfreq_dev_status {
 	/* both since the last measure */
@@ -65,7 +61,6 @@ struct devfreq_dev_status {
 	unsigned long busy_time;
 	unsigned long current_frequency;
 	void *private_data;
-	bool busy;
 };
 
 /*
@@ -96,16 +91,6 @@ struct devfreq_dev_status {
  *			devfreq.last_status.
  * @get_cur_freq:	The device should provide the current frequency
  *			at which it is operating.
- * @set_high_wmark:	This is an optional callback to set high
- *			watermark for watermark event. The value is
- *			be scaled between 0 and 1000 where 1000 equals to
- *			100% load. Setting this value to 1000 disables
- *			the event
- * @set_low_wmark:	This is an optional callback to set low
- *			watermark for watermark event. The value is
- *			be scaled between 0 and 1000 where 1000 equals to
- *			100% load. Setting this value to 0 disables the
- *			event.
  * @exit:		An optional callback that is called when devfreq
  *			is removing the devfreq object due to error or
  *			from devfreq_remove_device() call. If the user
@@ -114,18 +99,20 @@ struct devfreq_dev_status {
  * @freq_table:		Optional list of frequencies to support statistics
  *			and freq_table must be generated in ascending order.
  * @max_state:		The size of freq_table.
+ *
+ * @is_cooling_device: A self-explanatory boolean giving the device a
+ *                     cooling effect property.
  */
 struct devfreq_dev_profile {
 	unsigned long initial_freq;
 	unsigned int polling_ms;
 	enum devfreq_timer timer;
+	bool is_cooling_device;
 
 	int (*target)(struct device *dev, unsigned long *freq, u32 flags);
 	int (*get_dev_status)(struct device *dev,
 			      struct devfreq_dev_status *stat);
 	int (*get_cur_freq)(struct device *dev, unsigned long *freq);
-	int (*set_high_wmark)(struct device *dev, unsigned int val);
-	int (*set_low_wmark)(struct device *dev, unsigned int val);
 	void (*exit)(struct device *dev);
 
 	unsigned long *freq_table;
@@ -155,15 +142,15 @@ struct devfreq_stats {
  *		using devfreq.
  * @profile:	device-specific devfreq profile
  * @governor:	method how to choose frequency based on the usage.
- * @governor_name:	devfreq governor name for use with this devfreq
+ * @opp_table:	Reference to OPP table of dev.parent, if one exists.
  * @nb:		notifier block used to notify devfreq object that it should
  *		reevaluate operable frequencies. Devfreq users may use
  *		devfreq.nb to the corresponding register notifier call chain.
  * @work:	delayed work for load monitoring.
  * @previous_freq:	previously configured frequency value.
  * @last_status:	devfreq user device info, performance statistics
- * @data:	Private data of the governor. The devfreq framework does not
- *		touch this.
+ * @data:	devfreq driver pass to governors, governor should not change it.
+ * @governor_data:	private data for governors, devfreq core doesn't touch it.
  * @user_min_freq_req:	PM QoS minimum frequency request from user (via sysfs)
  * @user_max_freq_req:	PM QoS maximum frequency request from user (via sysfs)
  * @scaling_min_freq:	Limit minimum frequency requested by OPP interface
@@ -174,6 +161,7 @@ struct devfreq_stats {
  * @suspend_count:	 suspend requests counter for a device.
  * @stats:	Statistics of devfreq device behavior
  * @transition_notifier_list: list head of DEVFREQ_TRANSITION_NOTIFIER notifier
+ * @cdev:	Cooling device pointer if the devfreq has cooling property
  * @nb_min:		Notifier block for DEV_PM_QOS_MIN_FREQUENCY
  * @nb_max:		Notifier block for DEV_PM_QOS_MAX_FREQUENCY
  *
@@ -192,14 +180,15 @@ struct devfreq {
 	struct device dev;
 	struct devfreq_dev_profile *profile;
 	const struct devfreq_governor *governor;
-	char governor_name[DEVFREQ_NAME_LEN];
+	struct opp_table *opp_table;
 	struct notifier_block nb;
 	struct delayed_work work;
 
 	unsigned long previous_freq;
 	struct devfreq_dev_status last_status;
 
-	void *data; /* private data for governors */
+	void *data;
+	void *governor_data;
 
 	struct dev_pm_qos_request user_min_freq_req;
 	struct dev_pm_qos_request user_max_freq_req;
@@ -215,6 +204,9 @@ struct devfreq {
 	struct devfreq_stats stats;
 
 	struct srcu_notifier_head transition_notifier_list;
+
+	/* Pointer to the cooling device if used for thermal mitigation */
+	struct thermal_cooling_device *cdev;
 
 	struct notifier_block nb_min;
 	struct notifier_block nb_max;
@@ -240,7 +232,6 @@ void devm_devfreq_remove_device(struct device *dev, struct devfreq *devfreq);
 /* Supposed to be called by PM callbacks */
 int devfreq_suspend_device(struct devfreq *devfreq);
 int devfreq_resume_device(struct devfreq *devfreq);
-int devfreq_watermark_event(struct devfreq *devfreq, int type);
 
 void devfreq_suspend(void);
 void devfreq_resume(void);
@@ -442,12 +433,6 @@ static inline struct devfreq *devfreq_get_devfreq_by_phandle(struct device *dev,
 static inline int devfreq_update_stats(struct devfreq *df)
 {
 	return -EINVAL;
-}
-
-static inline int devfreq_watermark_event(struct devfreq *devfreq,
-					int type)
-{
-	return 0;
 }
 #endif /* CONFIG_PM_DEVFREQ */
 

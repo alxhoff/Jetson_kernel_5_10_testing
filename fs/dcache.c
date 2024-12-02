@@ -84,6 +84,8 @@ const struct qstr empty_name = QSTR_INIT("", 0);
 EXPORT_SYMBOL(empty_name);
 const struct qstr slash_name = QSTR_INIT("/", 1);
 EXPORT_SYMBOL(slash_name);
+const struct qstr dotdot_name = QSTR_INIT("..", 2);
+EXPORT_SYMBOL(dotdot_name);
 
 /*
  * This is the single most critical data structure when it comes
@@ -456,23 +458,6 @@ static void d_lru_shrink_move(struct list_lru_one *lru, struct dentry *dentry,
 	list_lru_isolate_move(lru, &dentry->d_lru, list);
 }
 
-/**
- * d_drop - drop a dentry
- * @dentry: dentry to drop
- *
- * d_drop() unhashes the entry from the parent dentry hashes, so that it won't
- * be found through a VFS lookup any more. Note that this is different from
- * deleting the dentry - d_delete will try to mark the dentry negative if
- * possible, giving a successful _negative_ lookup, while d_drop will
- * just make the cache lookup fail.
- *
- * d_drop() is used mainly for stuff that wants to invalidate a dentry for some
- * reason (NFS timeouts or autofs deletes).
- *
- * __d_drop requires dentry->d_lock
- * ___d_drop doesn't mark dentry as "unhashed"
- *   (dentry->d_hash.pprev will be LIST_POISON2, not NULL).
- */
 static void ___d_drop(struct dentry *dentry)
 {
 	struct hlist_bl_head *b;
@@ -501,6 +486,24 @@ void __d_drop(struct dentry *dentry)
 }
 EXPORT_SYMBOL(__d_drop);
 
+/**
+ * d_drop - drop a dentry
+ * @dentry: dentry to drop
+ *
+ * d_drop() unhashes the entry from the parent dentry hashes, so that it won't
+ * be found through a VFS lookup any more. Note that this is different from
+ * deleting the dentry - d_delete will try to mark the dentry negative if
+ * possible, giving a successful _negative_ lookup, while d_drop will
+ * just make the cache lookup fail.
+ *
+ * d_drop() is used mainly for stuff that wants to invalidate a dentry for some
+ * reason (NFS timeouts or autofs deletes).
+ *
+ * __d_drop requires dentry->d_lock
+ *
+ * ___d_drop doesn't mark dentry as "unhashed"
+ * (dentry->d_hash.pprev will be LIST_POISON2, not NULL).
+ */
 void d_drop(struct dentry *dentry)
 {
 	spin_lock(&dentry->d_lock);
@@ -793,10 +796,17 @@ static inline bool fast_dput(struct dentry *dentry)
 	 * a reference to the dentry and change that, but
 	 * our work is done - we can leave the dentry
 	 * around with a zero refcount.
+	 *
+	 * Nevertheless, there are two cases that we should kill
+	 * the dentry anyway.
+	 * 1. free disconnected dentries as soon as their refcount
+	 *    reached zero.
+	 * 2. free dentries if they should not be cached.
 	 */
 	smp_rmb();
 	d_flags = READ_ONCE(dentry->d_flags);
-	d_flags &= DCACHE_REFERENCED | DCACHE_LRU_LIST | DCACHE_DISCONNECTED;
+	d_flags &= DCACHE_REFERENCED | DCACHE_LRU_LIST |
+			DCACHE_DISCONNECTED | DCACHE_DONTCACHE;
 
 	/* Nothing to do? Dropping the reference was all we needed? */
 	if (d_flags == (DCACHE_REFERENCED | DCACHE_LRU_LIST) && !d_unhashed(dentry))
@@ -989,20 +999,6 @@ struct dentry *d_find_any_alias(struct inode *inode)
 }
 EXPORT_SYMBOL(d_find_any_alias);
 
-/**
- * d_find_alias - grab a hashed alias of inode
- * @inode: inode in question
- *
- * If inode has a hashed alias, or is a directory and has any alias,
- * acquire the reference to alias and return it. Otherwise return NULL.
- * Notice that if inode is a directory there can be only one alias and
- * it can be unhashed only if it has no children, or if it is the root
- * of a filesystem, or if the directory was renamed and d_revalidate
- * was the first vfs operation to notice.
- *
- * If the inode has an IS_ROOT, DCACHE_DISCONNECTED alias, then prefer
- * any other hashed alias over that one.
- */
 static struct dentry *__d_find_alias(struct inode *inode)
 {
 	struct dentry *alias;
@@ -1022,6 +1018,20 @@ static struct dentry *__d_find_alias(struct inode *inode)
 	return NULL;
 }
 
+/**
+ * d_find_alias - grab a hashed alias of inode
+ * @inode: inode in question
+ *
+ * If inode has a hashed alias, or is a directory and has any alias,
+ * acquire the reference to alias and return it. Otherwise return NULL.
+ * Notice that if inode is a directory there can be only one alias and
+ * it can be unhashed only if it has no children, or if it is the root
+ * of a filesystem, or if the directory was renamed and d_revalidate
+ * was the first vfs operation to notice.
+ *
+ * If the inode has an IS_ROOT, DCACHE_DISCONNECTED alias, then prefer
+ * any other hashed alias over that one.
+ */
 struct dentry *d_find_alias(struct inode *inode)
 {
 	struct dentry *de = NULL;
@@ -1034,6 +1044,31 @@ struct dentry *d_find_alias(struct inode *inode)
 	return de;
 }
 EXPORT_SYMBOL(d_find_alias);
+
+/*
+ *  Caller MUST be holding rcu_read_lock() and be guaranteed
+ *  that inode won't get freed until rcu_read_unlock().
+ */
+struct dentry *d_find_alias_rcu(struct inode *inode)
+{
+	struct hlist_head *l = &inode->i_dentry;
+	struct dentry *de = NULL;
+
+	spin_lock(&inode->i_lock);
+	// ->i_dentry and ->i_rcu are colocated, but the latter won't be
+	// used without having I_FREEING set, which means no aliases left
+	if (likely(!(inode->i_state & I_FREEING) && !hlist_empty(l))) {
+		if (S_ISDIR(inode->i_mode)) {
+			de = hlist_entry(l->first, struct dentry, d_u.d_alias);
+		} else {
+			hlist_for_each_entry(de, l, d_u.d_alias)
+				if (!d_unhashed(de))
+					break;
+		}
+	}
+	spin_unlock(&inode->i_lock);
+	return de;
+}
 
 /*
  *	Try to kill dentries associated with this inode.
@@ -1285,7 +1320,7 @@ enum d_walk_ret {
  *
  * The @enter() callbacks are called with d_lock held.
  */
-static void d_walk(struct dentry *parent, void *data,
+void d_walk(struct dentry *parent, void *data,
 		   enum d_walk_ret (*enter)(void *, struct dentry *))
 {
 	struct dentry *this_parent;
@@ -1390,6 +1425,7 @@ rename_retry:
 	seq = 1;
 	goto again;
 }
+EXPORT_SYMBOL_GPL(d_walk);
 
 struct check_mount {
 	struct vfsmount *mnt;
@@ -2143,8 +2179,8 @@ EXPORT_SYMBOL(d_obtain_root);
  * same inode, only the actual correct case is stored in the dcache for
  * case-insensitive filesystems.
  *
- * For a case-insensitive lookup match and if the the case-exact dentry
- * already exists in in the dcache, use it and return it.
+ * For a case-insensitive lookup match and if the case-exact dentry
+ * already exists in the dcache, use it and return it.
  *
  * If no entry exists with the exact case name, allocate new dentry with
  * the exact case, and return the spliced entry.
@@ -2502,7 +2538,13 @@ EXPORT_SYMBOL(d_rehash);
 
 static inline unsigned start_dir_add(struct inode *dir)
 {
-
+	/*
+	 * The caller has a spinlock_t (dentry::d_lock) acquired which disables
+	 * preemption on !PREEMPT_RT. On PREEMPT_RT the lock does not disable
+	 * preemption and it has be done explicitly.
+	 */
+	if (IS_ENABLED(CONFIG_PREEMPT_RT))
+		preempt_disable();
 	for (;;) {
 		unsigned n = dir->i_dir_seq;
 		if (!(n & 1) && cmpxchg(&dir->i_dir_seq, n, n + 1) == n)
@@ -2514,25 +2556,30 @@ static inline unsigned start_dir_add(struct inode *dir)
 static inline void end_dir_add(struct inode *dir, unsigned n)
 {
 	smp_store_release(&dir->i_dir_seq, n + 2);
+	if (IS_ENABLED(CONFIG_PREEMPT_RT))
+		preempt_enable();
 }
 
 static void d_wait_lookup(struct dentry *dentry)
 {
-	if (d_in_lookup(dentry)) {
-		DECLARE_WAITQUEUE(wait, current);
-		add_wait_queue(dentry->d_wait, &wait);
-		do {
-			set_current_state(TASK_UNINTERRUPTIBLE);
-			spin_unlock(&dentry->d_lock);
-			schedule();
-			spin_lock(&dentry->d_lock);
-		} while (d_in_lookup(dentry));
-	}
+	struct swait_queue __wait;
+
+	if (!d_in_lookup(dentry))
+		return;
+
+	INIT_LIST_HEAD(&__wait.task_list);
+	do {
+		prepare_to_swait_exclusive(dentry->d_wait, &__wait, TASK_UNINTERRUPTIBLE);
+		spin_unlock(&dentry->d_lock);
+		schedule();
+		spin_lock(&dentry->d_lock);
+	} while (d_in_lookup(dentry));
+	finish_swait(dentry->d_wait, &__wait);
 }
 
 struct dentry *d_alloc_parallel(struct dentry *parent,
 				const struct qstr *name,
-				wait_queue_head_t *wq)
+				struct swait_queue_head *wq)
 {
 	unsigned int hash = name->hash;
 	struct hlist_bl_head *b = in_lookup_hash(parent, hash);
@@ -2647,7 +2694,7 @@ void __d_lookup_done(struct dentry *dentry)
 	hlist_bl_lock(b);
 	dentry->d_flags &= ~DCACHE_PAR_LOOKUP;
 	__hlist_bl_del(&dentry->d_u.d_in_lookup_hash);
-	wake_up_all(dentry->d_wait);
+	swake_up_all(dentry->d_wait);
 	dentry->d_wait = NULL;
 	hlist_bl_unlock(b);
 	INIT_HLIST_NODE(&dentry->d_u.d_alias);
@@ -2935,6 +2982,7 @@ void d_exchange(struct dentry *dentry1, struct dentry *dentry2)
 
 	write_sequnlock(&rename_lock);
 }
+EXPORT_SYMBOL_GPL(d_exchange);
 
 /**
  * d_ancestor - search for an ancestor

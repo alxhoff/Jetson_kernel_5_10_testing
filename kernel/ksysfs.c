@@ -106,7 +106,12 @@ KERNEL_ATTR_RO(kexec_crash_loaded);
 static ssize_t kexec_crash_size_show(struct kobject *kobj,
 				       struct kobj_attribute *attr, char *buf)
 {
-	return sprintf(buf, "%zu\n", crash_get_memory_size());
+	ssize_t size = crash_get_memory_size();
+
+	if (size < 0)
+		return size;
+
+	return sprintf(buf, "%zd\n", size);
 }
 static ssize_t kexec_crash_size_store(struct kobject *kobj,
 				   struct kobj_attribute *attr,
@@ -137,6 +142,15 @@ static ssize_t vmcoreinfo_show(struct kobject *kobj,
 KERNEL_ATTR_RO(vmcoreinfo);
 
 #endif /* CONFIG_CRASH_CORE */
+
+#if defined(CONFIG_PREEMPT_RT)
+static ssize_t realtime_show(struct kobject *kobj,
+			     struct kobj_attribute *attr, char *buf)
+{
+	return sprintf(buf, "%d\n", 1);
+}
+KERNEL_ATTR_RO(realtime);
+#endif
 
 /* whether file capabilities are enabled */
 static ssize_t fscaps_show(struct kobject *kobj,
@@ -228,6 +242,9 @@ static struct attribute * kernel_attrs[] = {
 #ifndef CONFIG_TINY_RCU
 	&rcu_expedited_attr.attr,
 	&rcu_normal_attr.attr,
+#endif
+#ifdef CONFIG_PREEMPT_RT
+	&realtime_attr.attr,
 #endif
 	NULL
 };

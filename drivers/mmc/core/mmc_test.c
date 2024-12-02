@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 /*
  *  Copyright 2007-2008 Pierre Ossman
- *  Copyright (c) 2017-2019, NVIDIA CORPORATION.  All rights reserved.
+ *  Copyright (c) 2017-2023, NVIDIA CORPORATION.  All rights reserved.
  */
 
 #include <linux/mmc/core.h>
@@ -625,7 +625,7 @@ static unsigned int mmc_test_capacity(struct mmc_card *card)
  * Fill the first couple of sectors of the card with known data
  * so that bad reads/writes can be detected
  */
-static int __mmc_test_prepare(struct mmc_test_card *test, int write)
+static int __mmc_test_prepare(struct mmc_test_card *test, int write, int val)
 {
 	int ret, i;
 
@@ -634,7 +634,7 @@ static int __mmc_test_prepare(struct mmc_test_card *test, int write)
 		return ret;
 
 	if (write)
-		memset(test->buffer, 0xDF, 512);
+		memset(test->buffer, val, 512);
 	else {
 		for (i = 0; i < 512; i++)
 			test->buffer[i] = i;
@@ -651,31 +651,17 @@ static int __mmc_test_prepare(struct mmc_test_card *test, int write)
 
 static int mmc_test_prepare_write(struct mmc_test_card *test)
 {
-	return __mmc_test_prepare(test, 1);
+	return __mmc_test_prepare(test, 1, 0xDF);
 }
 
 static int mmc_test_prepare_read(struct mmc_test_card *test)
 {
-	return __mmc_test_prepare(test, 0);
+	return __mmc_test_prepare(test, 0, 0);
 }
 
 static int mmc_test_cleanup(struct mmc_test_card *test)
 {
-	int ret, i;
-
-	ret = mmc_test_set_blksize(test, 512);
-	if (ret)
-		return ret;
-
-	memset(test->buffer, 0, 512);
-
-	for (i = 0; i < BUFFER_SIZE / 512; i++) {
-		ret = mmc_test_buffer_transfer(test, test->buffer, i, 512, 1);
-		if (ret)
-			return ret;
-	}
-
-	return 0;
+	return __mmc_test_prepare(test, 1, 0);
 }
 
 /*******************************************************************/
@@ -2125,7 +2111,7 @@ static int mmc_test_rw_multiple(struct mmc_test_card *test,
 	if (mmc_can_erase(test->card) &&
 	    tdata->prepare & MMC_TEST_PREP_ERASE) {
 		ret = mmc_erase(test->card, dev_addr,
-				size / 512, MMC_SECURE_ERASE_ARG);
+				size / 512, test->card->erase_arg);
 		if (ret)
 			ret = mmc_erase(test->card, dev_addr,
 					size / 512, MMC_ERASE_ARG);
@@ -3196,7 +3182,8 @@ static int __mmc_test_register_dbgfs_file(struct mmc_card *card,
 	struct mmc_test_dbgfs_file *df;
 
 	if (card->debugfs_root)
-		debugfs_create_file(name, mode, card->debugfs_root, card, fops);
+		file = debugfs_create_file(name, mode, card->debugfs_root,
+					   card, fops);
 
 	df = kmalloc(sizeof(*df), GFP_KERNEL);
 	if (!df) {

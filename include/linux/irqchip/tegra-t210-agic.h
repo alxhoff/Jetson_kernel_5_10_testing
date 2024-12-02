@@ -1,19 +1,6 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
 /*
- * include/linux/irqchip/tegra-t210-agic.h
- *
- * Header file for managing AGIC interrupt controller
- *
- * Copyright (C) 2014-2020 NVIDIA Corporation. All rights reserved.
- *
- * This software is licensed under the terms of the GNU General Public
- * License version 2, as published by the Free Software Foundation, and
- * may be copied, distributed, and modified under those terms.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
+ * Copyright (c) 2021-2022 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  */
 
 #ifndef _TEGRA_T210_AGIC_H_

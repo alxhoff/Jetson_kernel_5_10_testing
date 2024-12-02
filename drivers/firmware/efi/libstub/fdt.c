@@ -148,6 +148,12 @@ static efi_status_t update_fdt(void *orig_fdt, unsigned long orig_fdt_size,
 		}
 	}
 
+	fdt_val32 = cpu_to_fdt32(efi_get_secureboot());
+	status = fdt_setprop(fdt, node, "linux,uefi-secure-boot",
+			     &fdt_val32, sizeof(fdt_val32));
+	if (status)
+		goto fdt_set_fail;
+
 	/* Shrink the FDT back to its minimum size: */
 	fdt_pack(fdt);
 
@@ -238,7 +244,6 @@ static efi_status_t exit_boot_func(struct efi_boot_memmap *map,
 
 efi_status_t allocate_new_fdt_and_exit_boot(void *handle,
 					    unsigned long *new_fdt_addr,
-					    unsigned long max_addr,
 					    u64 initrd_addr, u64 initrd_size,
 					    char *cmdline_ptr,
 					    unsigned long fdt_addr,
@@ -272,22 +277,14 @@ efi_status_t allocate_new_fdt_and_exit_boot(void *handle,
 		return status;
 	}
 
-	efi_info("Exiting boot services and installing virtual address map...\n");
+	efi_info("Exiting boot services...\n");
 
 	map.map = &memory_map;
-	status = efi_allocate_pages(MAX_FDT_SIZE, new_fdt_addr, max_addr);
+	status = efi_allocate_pages(MAX_FDT_SIZE, new_fdt_addr, ULONG_MAX);
 	if (status != EFI_SUCCESS) {
 		efi_err("Unable to allocate memory for new device tree.\n");
 		goto fail;
 	}
-
-	/*
-	 * Now that we have done our final memory allocation (and free)
-	 * we can get the memory map key needed for exit_boot_services().
-	 */
-	status = efi_get_memory_map(&map);
-	if (status != EFI_SUCCESS)
-		goto fail_free_new_fdt;
 
 	status = update_fdt((void *)fdt_addr, fdt_size,
 			    (void *)*new_fdt_addr, MAX_FDT_SIZE, cmdline_ptr,

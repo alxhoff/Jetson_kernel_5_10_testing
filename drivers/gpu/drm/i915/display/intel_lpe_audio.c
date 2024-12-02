@@ -80,6 +80,7 @@ static struct platform_device *
 lpe_audio_platdev_create(struct drm_i915_private *dev_priv)
 {
 	struct drm_device *dev = &dev_priv->drm;
+	struct pci_dev *pdev = to_pci_dev(dev->dev);
 	struct platform_device_info pinfo = {};
 	struct resource *rsc;
 	struct platform_device *platdev;
@@ -99,9 +100,9 @@ lpe_audio_platdev_create(struct drm_i915_private *dev_priv)
 	rsc[0].flags    = IORESOURCE_IRQ;
 	rsc[0].name     = "hdmi-lpe-audio-irq";
 
-	rsc[1].start    = pci_resource_start(dev->pdev, 0) +
+	rsc[1].start    = pci_resource_start(pdev, 0) +
 		I915_HDMI_LPE_AUDIO_BASE;
-	rsc[1].end      = pci_resource_start(dev->pdev, 0) +
+	rsc[1].end      = pci_resource_start(pdev, 0) +
 		I915_HDMI_LPE_AUDIO_BASE + I915_HDMI_LPE_AUDIO_SIZE - 1;
 	rsc[1].flags    = IORESOURCE_MEM;
 	rsc[1].name     = "hdmi-lpe-audio-mmio";
@@ -174,6 +175,14 @@ static int lpe_audio_irq_init(struct drm_i915_private *dev_priv)
 				handle_simple_irq,
 				"hdmi_lpe_audio_irq_handler");
 
+	static const struct pci_device_id irq_quirk_ids[] = {
+		/* Dell Wyse 3040 */
+		{PCI_DEVICE_SUB(PCI_VENDOR_ID_INTEL, 0x22b0, 0x1028, 0x07c1)},
+		{}
+	};
+
+	if (pci_dev_present(irq_quirk_ids))
+		return 0;
 	return irq_set_chip_data(irq, dev_priv);
 }
 
@@ -297,12 +306,8 @@ int intel_lpe_audio_init(struct drm_i915_private *dev_priv)
  */
 void intel_lpe_audio_teardown(struct drm_i915_private *dev_priv)
 {
-	struct irq_desc *desc;
-
 	if (!HAS_LPE_AUDIO(dev_priv))
 		return;
-
-	desc = irq_to_desc(dev_priv->lpe_audio.irq);
 
 	lpe_audio_platdev_destroy(dev_priv);
 

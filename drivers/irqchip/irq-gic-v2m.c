@@ -24,8 +24,6 @@
 #include <linux/slab.h>
 #include <linux/spinlock.h>
 #include <linux/irqchip/arm-gic.h>
-#include <linux/dma-iommu.h>
-#include <linux/iommu.h>
 
 /*
 * MSI_TYPER:
@@ -176,13 +174,11 @@ static void gicv2m_unalloc_msi(struct v2m_data *v2m, unsigned int hwirq,
 	spin_unlock(&v2m_lock);
 }
 
-#define TEGRA_MSI_BASE 0x54000000
 static int gicv2m_irq_domain_alloc(struct irq_domain *domain, unsigned int virq,
 				   unsigned int nr_irqs, void *args)
 {
 	msi_alloc_info_t *info = args;
 	struct v2m_data *v2m = NULL, *tmp;
-	struct device *dev =  msi_desc_to_dev(info->desc);
 	int hwirq, offset, i, err = 0;
 
 	spin_lock(&v2m_lock);
@@ -215,8 +211,6 @@ static int gicv2m_irq_domain_alloc(struct irq_domain *domain, unsigned int virq,
 					      &gicv2m_irq_chip, v2m);
 	}
 
-	iommu_dma_map_msi_pages(dev, TEGRA_MSI_BASE, hwirq, nr_irqs);
-
 	return 0;
 
 fail:
@@ -230,12 +224,9 @@ static void gicv2m_irq_domain_free(struct irq_domain *domain,
 {
 	struct irq_data *d = irq_domain_get_irq_data(domain, virq);
 	struct v2m_data *v2m = irq_data_get_irq_chip_data(d);
-	struct device *dev = msi_desc_to_dev(irq_get_msi_desc(d->irq));
 
 	gicv2m_unalloc_msi(v2m, d->hwirq, nr_irqs);
 	irq_domain_free_irqs_parent(domain, virq, nr_irqs);
-
-	iommu_dma_unmap_msi_pages(dev, TEGRA_MSI_BASE, d->hwirq, nr_irqs);
 }
 
 static const struct irq_domain_ops gicv2m_domain_ops = {
@@ -278,7 +269,7 @@ static void gicv2m_teardown(void)
 
 	list_for_each_entry_safe(v2m, tmp, &v2m_nodes, entry) {
 		list_del(&v2m->entry);
-		kfree(v2m->bm);
+		bitmap_free(v2m->bm);
 		iounmap(v2m->base);
 		of_node_put(to_of_node(v2m->fwnode));
 		if (is_fwnode_irqchip(v2m->fwnode))
@@ -332,10 +323,8 @@ static int __init gicv2m_init_one(struct fwnode_handle *fwnode,
 	struct v2m_data *v2m;
 
 	v2m = kzalloc(sizeof(struct v2m_data), GFP_KERNEL);
-	if (!v2m) {
-		pr_err("Failed to allocate struct v2m_data.\n");
+	if (!v2m)
 		return -ENOMEM;
-	}
 
 	INIT_LIST_HEAD(&v2m->entry);
 	v2m->fwnode = fwnode;
@@ -380,7 +369,7 @@ static int __init gicv2m_init_one(struct fwnode_handle *fwnode,
 	 * the MSI data is the absolute value within the range from
 	 * spi_start to (spi_start + num_spis).
 	 *
-	 * Broadom NS2 GICv2m implementation has an erratum where the MSI data
+	 * Broadcom NS2 GICv2m implementation has an erratum where the MSI data
 	 * is 'spi_number - 32'
 	 *
 	 * Reading that register fails on the Graviton implementation
@@ -397,8 +386,7 @@ static int __init gicv2m_init_one(struct fwnode_handle *fwnode,
 			break;
 		}
 	}
-	v2m->bm = kcalloc(BITS_TO_LONGS(v2m->nr_spis), sizeof(long),
-			  GFP_KERNEL);
+	v2m->bm = bitmap_zalloc(v2m->nr_spis, GFP_KERNEL);
 	if (!v2m->bm) {
 		ret = -ENOMEM;
 		goto err_iounmap;

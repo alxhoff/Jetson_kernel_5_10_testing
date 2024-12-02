@@ -1,18 +1,15 @@
 // SPDX-License-Identifier: GPL-2.0-only
-// Copyright (C) 2019-2020 NVIDIA CORPORATION.  All rights reserved.
+// Copyright (C) 2019-2021 NVIDIA CORPORATION.  All rights reserved.
 
 #include <linux/bitfield.h>
 #include <linux/delay.h>
 #include <linux/of.h>
 #include <linux/platform_device.h>
 #include <linux/slab.h>
-#include <soc/tegra/fuse.h>
+
+#include <soc/tegra/mc.h>
 
 #include "arm-smmu.h"
-
-#ifdef CONFIG_ARM_SMMU_DEBUG
-#include <linux/arm-smmu-debug.h>
-#endif
 
 /*
  * Tegra194 has three ARM MMU-500 Instances.
@@ -20,17 +17,31 @@
  * interleaved IOVA accesses across them and translates accesses from
  * non-isochronous HW devices.
  * Third one is used for translating accesses from isochronous HW devices.
+ *
+ * In addition, the SMMU driver needs to coordinate with the memory controller
+ * driver to ensure that the right SID override is programmed for any given
+ * memory client. This is necessary to allow for use-case such as seamlessly
+ * handing over the display controller configuration from the firmware to the
+ * kernel.
+ *
  * This implementation supports programming of the two instances that must
- * be programmed identically.
- * The third instance usage is through standard arm-smmu driver itself and
- * is out of scope of this implementation.
+ * be programmed identically and takes care of invoking the memory controller
+ * driver for SID override programming after devices have been attached to an
+ * SMMU instance.
  */
-#define NUM_SMMU_INSTANCES 2
+#define MAX_SMMU_INSTANCES 2
 
 struct nvidia_smmu {
-	struct arm_smmu_device	smmu;
-	void __iomem		*bases[NUM_SMMU_INSTANCES];
+	struct arm_smmu_device smmu;
+	void __iomem *bases[MAX_SMMU_INSTANCES];
+	unsigned int num_instances;
+	struct tegra_mc *mc;
 };
+
+static inline struct nvidia_smmu *to_nvidia_smmu(struct arm_smmu_device *smmu)
+{
+	return container_of(smmu, struct nvidia_smmu, smmu);
+}
 
 static inline void __iomem *nvidia_smmu_page(struct arm_smmu_device *smmu,
 					     unsigned int inst, int page)
@@ -52,34 +63,13 @@ static u32 nvidia_smmu_read_reg(struct arm_smmu_device *smmu,
 static void nvidia_smmu_write_reg(struct arm_smmu_device *smmu,
 				  int page, int offset, u32 val)
 {
+	struct nvidia_smmu *nvidia = to_nvidia_smmu(smmu);
 	unsigned int i;
 
-	for (i = 0; i < NUM_SMMU_INSTANCES; i++) {
+	for (i = 0; i < nvidia->num_instances; i++) {
 		void __iomem *reg = nvidia_smmu_page(smmu, i, page) + offset;
 
 		writel_relaxed(val, reg);
-	}
-}
-
-static inline u64 read64_relaxed(volatile void __iomem *virt_addr)
-{
-	u64 val;
-	if (tegra_platform_is_sim()) {
-		val = (u64)readl_relaxed(virt_addr);
-		val |= ((u64)readl_relaxed(virt_addr + 4) << 32);
-	} else {
-		val = readq_relaxed(virt_addr);
-	}
-	return val;
-}
-
-static inline void write64_relaxed(u64 val, volatile void __iomem *virt_addr)
-{
-	if (tegra_platform_is_sim()) {
-		writel_relaxed((u32)val, virt_addr);
-		writel_relaxed((u32)(val >> 32), virt_addr + 4);
-	} else {
-		writeq_relaxed(val, virt_addr);
 	}
 }
 
@@ -88,29 +78,27 @@ static u64 nvidia_smmu_read_reg64(struct arm_smmu_device *smmu,
 {
 	void __iomem *reg = nvidia_smmu_page(smmu, 0, page) + offset;
 
-	return read64_relaxed(reg);
+	return readq_relaxed(reg);
 }
 
 static void nvidia_smmu_write_reg64(struct arm_smmu_device *smmu,
 				    int page, int offset, u64 val)
 {
+	struct nvidia_smmu *nvidia = to_nvidia_smmu(smmu);
 	unsigned int i;
 
-	for (i = 0; i < NUM_SMMU_INSTANCES; i++) {
+	for (i = 0; i < nvidia->num_instances; i++) {
 		void __iomem *reg = nvidia_smmu_page(smmu, i, page) + offset;
 
-		write64_relaxed(val, reg);
+		writeq_relaxed(val, reg);
 	}
 }
 
 static void nvidia_smmu_tlb_sync(struct arm_smmu_device *smmu, int page,
 				 int sync, int status)
 {
+	struct nvidia_smmu *nvidia = to_nvidia_smmu(smmu);
 	unsigned int delay;
-
-	if (tegra_platform_is_sim())
-		nvidia_smmu_write_reg64(smmu, page, ARM_SMMU_GR0_TLBIALLNSNH,
-					0);
 
 	arm_smmu_writel(smmu, page, sync, 0);
 
@@ -121,7 +109,7 @@ static void nvidia_smmu_tlb_sync(struct arm_smmu_device *smmu, int page,
 			u32 val = 0;
 			unsigned int i;
 
-			for (i = 0; i < NUM_SMMU_INSTANCES; i++) {
+			for (i = 0; i < nvidia->num_instances; i++) {
 				void __iomem *reg;
 
 				reg = nvidia_smmu_page(smmu, i, page) + status;
@@ -143,9 +131,10 @@ static void nvidia_smmu_tlb_sync(struct arm_smmu_device *smmu, int page,
 
 static int nvidia_smmu_reset(struct arm_smmu_device *smmu)
 {
+	struct nvidia_smmu *nvidia = to_nvidia_smmu(smmu);
 	unsigned int i;
 
-	for (i = 0; i < NUM_SMMU_INSTANCES; i++) {
+	for (i = 0; i < nvidia->num_instances; i++) {
 		u32 val;
 		void __iomem *reg = nvidia_smmu_page(smmu, i, ARM_SMMU_GR0) +
 				    ARM_SMMU_GR0_sGFSR;
@@ -188,8 +177,9 @@ static irqreturn_t nvidia_smmu_global_fault(int irq, void *dev)
 	unsigned int inst;
 	irqreturn_t ret = IRQ_NONE;
 	struct arm_smmu_device *smmu = dev;
+	struct nvidia_smmu *nvidia = to_nvidia_smmu(smmu);
 
-	for (inst = 0; inst < NUM_SMMU_INSTANCES; inst++) {
+	for (inst = 0; inst < nvidia->num_instances; inst++) {
 		irqreturn_t irq_ret;
 
 		irq_ret = nvidia_smmu_global_fault_inst(irq, smmu, inst);
@@ -233,11 +223,13 @@ static irqreturn_t nvidia_smmu_context_fault(int irq, void *dev)
 	struct arm_smmu_device *smmu;
 	struct iommu_domain *domain = dev;
 	struct arm_smmu_domain *smmu_domain;
+	struct nvidia_smmu *nvidia;
 
 	smmu_domain = container_of(domain, struct arm_smmu_domain, domain);
 	smmu = smmu_domain->smmu;
+	nvidia = to_nvidia_smmu(smmu);
 
-	for (inst = 0; inst < NUM_SMMU_INSTANCES; inst++) {
+	for (inst = 0; inst < nvidia->num_instances; inst++) {
 		irqreturn_t irq_ret;
 
 		/*
@@ -255,12 +247,43 @@ static irqreturn_t nvidia_smmu_context_fault(int irq, void *dev)
 	return ret;
 }
 
-static void nvidia_smmu_write_sctlr(struct arm_smmu_device *smmu, int idx,
-		u32 reg)
+static void nvidia_smmu_probe_finalize(struct arm_smmu_device *smmu, struct device *dev)
 {
-	reg |= ARM_SMMU_SCTLR_HUPCF;
+	struct nvidia_smmu *nvidia = to_nvidia_smmu(smmu);
+	int err;
 
-	arm_smmu_cb_write(smmu, idx, ARM_SMMU_CB_SCTLR, reg);
+	err = tegra_mc_probe_device(nvidia->mc, dev);
+	if (err < 0)
+		dev_err(smmu->dev, "memory controller probe failed for %s: %d\n",
+			dev_name(dev), err);
+}
+
+static int nvidia_smmu_init_context(struct arm_smmu_domain *smmu_domain,
+				    struct io_pgtable_cfg *pgtbl_cfg,
+				    struct device *dev)
+{
+	struct arm_smmu_device *smmu = smmu_domain->smmu;
+	const struct device_node *np = smmu->dev->of_node;
+
+	/*
+	 * Tegra194 and Tegra234 SoCs have the erratum that causes walk cache
+	 * entries to not be invalidated correctly. The problem is that the walk
+	 * cache index generated for IOVA is not same across translation and
+	 * invalidation requests. This is leading to page faults when PMD entry
+	 * is released during unmap and populated with new PTE table during
+	 * subsequent map request. Disabling large page mappings avoids the
+	 * release of PMD entry and avoid translations seeing stale PMD entry in
+	 * walk cache.
+	 * Fix this by limiting the page mappings to PAGE_SIZE on Tegra194 and
+	 * Tegra234.
+	 */
+	if (of_device_is_compatible(np, "nvidia,tegra234-smmu") ||
+	    of_device_is_compatible(np, "nvidia,tegra194-smmu")) {
+		smmu->pgsize_bitmap = PAGE_SIZE;
+		pgtbl_cfg->pgsize_bitmap = smmu->pgsize_bitmap;
+	}
+
+	return 0;
 }
 
 static const struct arm_smmu_impl nvidia_smmu_impl = {
@@ -272,7 +295,13 @@ static const struct arm_smmu_impl nvidia_smmu_impl = {
 	.tlb_sync = nvidia_smmu_tlb_sync,
 	.global_fault = nvidia_smmu_global_fault,
 	.context_fault = nvidia_smmu_context_fault,
-	.write_sctlr = nvidia_smmu_write_sctlr,
+	.probe_finalize = nvidia_smmu_probe_finalize,
+	.init_context = nvidia_smmu_init_context,
+};
+
+static const struct arm_smmu_impl nvidia_smmu_single_impl = {
+	.probe_finalize = nvidia_smmu_probe_finalize,
+	.init_context = nvidia_smmu_init_context,
 };
 
 struct arm_smmu_device *nvidia_smmu_impl_init(struct arm_smmu_device *smmu)
@@ -281,43 +310,36 @@ struct arm_smmu_device *nvidia_smmu_impl_init(struct arm_smmu_device *smmu)
 	struct device *dev = smmu->dev;
 	struct nvidia_smmu *nvidia_smmu;
 	struct platform_device *pdev = to_platform_device(dev);
+	unsigned int i;
 
-	nvidia_smmu = devm_kzalloc(dev, sizeof(*nvidia_smmu), GFP_KERNEL);
+	nvidia_smmu = devm_krealloc(dev, smmu, sizeof(*nvidia_smmu), GFP_KERNEL);
 	if (!nvidia_smmu)
 		return ERR_PTR(-ENOMEM);
 
-	/*
-	 * Copy the data from struct arm_smmu_device *smmu allocated in
-	 * arm-smmu.c. The smmu from struct nvidia_smmu replaces the smmu
-	 * pointer used in arm-smmu.c once this function returns.
-	 * This is necessary to derive nvidia_smmu from smmu pointer passed
-	 * through arm_smmu_impl function calls subsequently.
-	 */
-	nvidia_smmu->smmu = *smmu;
+	nvidia_smmu->mc = devm_tegra_memory_controller_get(dev);
+	if (IS_ERR(nvidia_smmu->mc))
+		return ERR_CAST(nvidia_smmu->mc);
+
 	/* Instance 0 is ioremapped by arm-smmu.c. */
 	nvidia_smmu->bases[0] = smmu->base;
+	nvidia_smmu->num_instances++;
 
-	res = platform_get_resource(pdev, IORESOURCE_MEM, 1);
-	if (!res)
-		return ERR_PTR(-ENODEV);
+	for (i = 1; i < MAX_SMMU_INSTANCES; i++) {
+		res = platform_get_resource(pdev, IORESOURCE_MEM, i);
+		if (!res)
+			break;
 
-	nvidia_smmu->bases[1] = devm_ioremap_resource(dev, res);
-	if (IS_ERR(nvidia_smmu->bases[1]))
-		return ERR_CAST(nvidia_smmu->bases[1]);
+		nvidia_smmu->bases[i] = devm_ioremap_resource(dev, res);
+		if (IS_ERR(nvidia_smmu->bases[i]))
+			return ERR_CAST(nvidia_smmu->bases[i]);
 
-	nvidia_smmu->smmu.impl = &nvidia_smmu_impl;
+		nvidia_smmu->num_instances++;
+	}
 
-	/*
-	 * Free the struct arm_smmu_device *smmu allocated in arm-smmu.c.
-	 * Once this function returns, arm-smmu.c would use arm_smmu_device
-	 * allocated as part of struct nvidia_smmu.
-	 */
-	devm_kfree(dev, smmu);
-
-#ifdef CONFIG_ARM_SMMU_DEBUG
-	arm_smmu_debugfs_setup_bases(&nvidia_smmu->smmu, NUM_SMMU_INSTANCES,
-					nvidia_smmu->bases);
-#endif
+	if (nvidia_smmu->num_instances == 1)
+		nvidia_smmu->smmu.impl = &nvidia_smmu_single_impl;
+	else
+		nvidia_smmu->smmu.impl = &nvidia_smmu_impl;
 
 	return &nvidia_smmu->smmu;
 }

@@ -65,8 +65,14 @@ static int imx8mm_tmu_get_temp(void *data, int *temp)
 	u32 val;
 
 	val = readl_relaxed(tmu->base + TRITSR) & TRITSR_TEMP0_VAL_MASK;
+
+	/*
+	 * Do not validate against the V bit (bit 31) due to errata
+	 * ERR051272: TMU: Bit 31 of registers TMU_TSCR/TMU_TRITSR/TMU_TRATSR invalid
+	 */
+
 	*temp = val * 1000;
-	if (*temp < VER1_TEMP_LOW_LIMIT)
+	if (*temp < VER1_TEMP_LOW_LIMIT || *temp > VER2_TEMP_HIGH_LIMIT)
 		return -EAGAIN;
 
 	return 0;
@@ -169,10 +175,11 @@ static int imx8mm_tmu_probe(struct platform_device *pdev)
 							     &tmu->sensors[i],
 							     &tmu_tz_ops);
 		if (IS_ERR(tmu->sensors[i].tzd)) {
+			ret = PTR_ERR(tmu->sensors[i].tzd);
 			dev_err(&pdev->dev,
 				"failed to register thermal zone sensor[%d]: %d\n",
 				i, ret);
-			return PTR_ERR(tmu->sensors[i].tzd);
+			goto disable_clk;
 		}
 		tmu->sensors[i].hw_id = i;
 	}
@@ -187,6 +194,10 @@ static int imx8mm_tmu_probe(struct platform_device *pdev)
 	imx8mm_tmu_enable(tmu, true);
 
 	return 0;
+
+disable_clk:
+	clk_disable_unprepare(tmu->clk);
+	return ret;
 }
 
 static int imx8mm_tmu_remove(struct platform_device *pdev)

@@ -4,7 +4,7 @@
  *
  * Tegra pulse-width-modulation controller driver
  *
- * Copyright (c) 2010-2022, NVIDIA Corporation.
+ * Copyright (c) 2010-2020, NVIDIA Corporation.
  * Based on arch/arm/plat-mxc/pwm.c by Sascha Hauer <s.hauer@pengutronix.de>
  *
  * Overview of Tegra Pulse Width Modulator Register:
@@ -42,11 +42,15 @@
 #include <linux/module.h>
 #include <linux/of.h>
 #include <linux/of_device.h>
+#include <linux/pm_opp.h>
 #include <linux/pwm.h>
 #include <linux/platform_device.h>
 #include <linux/pinctrl/consumer.h>
+#include <linux/pm_runtime.h>
 #include <linux/slab.h>
 #include <linux/reset.h>
+
+#include <soc/tegra/common.h>
 
 #define PWM_ENABLE	(1 << 31)
 #define PWM_DUTY_WIDTH	8
@@ -74,8 +78,6 @@ struct tegra_pwm_chip {
 	void __iomem *regs;
 
 	const struct tegra_pwm_soc *soc;
-	int (*clk_enable)(struct clk *clk);
-	void (*clk_disable)(struct clk *clk);
 };
 
 static inline struct tegra_pwm_chip *to_tegra_pwm_chip(struct pwm_chip *chip)
@@ -98,7 +100,7 @@ static int tegra_pwm_config(struct pwm_chip *chip, struct pwm_device *pwm,
 			    int duty_ns, int period_ns)
 {
 	struct tegra_pwm_chip *pc = to_tegra_pwm_chip(chip);
-	unsigned long long c = duty_ns, hz;
+	unsigned long long c = duty_ns;
 	unsigned long rate, required_clk_rate;
 	u32 val = 0;
 	int err;
@@ -144,10 +146,21 @@ static int tegra_pwm_config(struct pwm_chip *chip, struct pwm_device *pwm,
 		 * source clock rate as required_clk_rate, PWM controller will
 		 * be able to configure the requested period.
 		 */
-		required_clk_rate =
-			(NSEC_PER_SEC / period_ns) << PWM_DUTY_WIDTH;
+		required_clk_rate = DIV_ROUND_UP_ULL((u64)NSEC_PER_SEC << PWM_DUTY_WIDTH,
+						     period_ns);
 
-		err = clk_set_rate(pc->clk, required_clk_rate);
+		if (required_clk_rate > clk_round_rate(pc->clk, required_clk_rate))
+			/*
+			 * required_clk_rate is a lower bound for the input
+			 * rate; for lower rates there is no value for PWM_SCALE
+			 * that yields a period less than or equal to the
+			 * requested period. Hence, for lower rates, double the
+			 * required_clk_rate to get a clock rate that can meet
+			 * the requested period.
+			 */
+			required_clk_rate *= 2;
+
+		err = dev_pm_opp_set_rate(pc->dev, required_clk_rate);
 		if (err < 0)
 			return -EINVAL;
 
@@ -155,11 +168,9 @@ static int tegra_pwm_config(struct pwm_chip *chip, struct pwm_device *pwm,
 		pc->clk_rate = clk_get_rate(pc->clk);
 	}
 
-	rate = pc->clk_rate >> PWM_DUTY_WIDTH;
-
 	/* Consider precision in PWM_SCALE_WIDTH rate calculation */
-	hz = DIV_ROUND_CLOSEST_ULL(100ULL * NSEC_PER_SEC, period_ns);
-	rate = DIV_ROUND_CLOSEST_ULL(100ULL * rate, hz);
+	rate = mul_u64_u64_div_u64(pc->clk_rate, period_ns,
+				   (u64)NSEC_PER_SEC << PWM_DUTY_WIDTH);
 
 	/*
 	 * Since the actual PWM divider is the register's frequency divider
@@ -168,6 +179,8 @@ static int tegra_pwm_config(struct pwm_chip *chip, struct pwm_device *pwm,
 	 */
 	if (rate > 0)
 		rate--;
+	else
+		return -EINVAL;
 
 	/*
 	 * Make sure that the rate will fit in the register's frequency
@@ -183,8 +196,8 @@ static int tegra_pwm_config(struct pwm_chip *chip, struct pwm_device *pwm,
 	 * before writing the register. Otherwise, keep it enabled.
 	 */
 	if (!pwm_is_enabled(pwm)) {
-		err = pc->clk_enable(pc->clk);
-		if (err < 0)
+		err = pm_runtime_resume_and_get(pc->dev);
+		if (err)
 			return err;
 	} else
 		val |= PWM_ENABLE;
@@ -195,7 +208,7 @@ static int tegra_pwm_config(struct pwm_chip *chip, struct pwm_device *pwm,
 	 * If the PWM is not enabled, turn the clock off again to save power.
 	 */
 	if (!pwm_is_enabled(pwm))
-		pc->clk_disable(pc->clk);
+		pm_runtime_put(pc->dev);
 
 	return 0;
 }
@@ -206,8 +219,8 @@ static int tegra_pwm_enable(struct pwm_chip *chip, struct pwm_device *pwm)
 	int rc = 0;
 	u32 val;
 
-	rc = pc->clk_enable(pc->clk);
-	if (rc < 0)
+	rc = pm_runtime_resume_and_get(pc->dev);
+	if (rc)
 		return rc;
 
 	val = pwm_readl(pc, pwm->hwpwm);
@@ -226,40 +239,19 @@ static void tegra_pwm_disable(struct pwm_chip *chip, struct pwm_device *pwm)
 	val &= ~PWM_ENABLE;
 	pwm_writel(pc, pwm->hwpwm, val);
 
-	pc->clk_disable(pc->clk);
-}
-
-static int tegra_pwm_apply(struct pwm_chip *chip, struct pwm_device *pwm,
-		const struct pwm_state *state)
-{
-	int err;
-
-	if (!state->enabled) {
-		if (pwm->state.enabled)
-			tegra_pwm_disable(chip, pwm);
-		return 0;
-	}
-
-	err = tegra_pwm_config(chip, pwm, state->duty_cycle, state->period);
-	if (err)
-		return err;
-
-	if (!pwm->state.enabled)
-		err = tegra_pwm_enable(chip, pwm);
-
-	return err;
+	pm_runtime_put_sync(pc->dev);
 }
 
 static const struct pwm_ops tegra_pwm_ops = {
-	.apply	= tegra_pwm_apply,
-	.owner	= THIS_MODULE,
+	.config = tegra_pwm_config,
+	.enable = tegra_pwm_enable,
+	.disable = tegra_pwm_disable,
+	.owner = THIS_MODULE,
 };
 
 static int tegra_pwm_probe(struct platform_device *pdev)
 {
 	struct tegra_pwm_chip *pwm;
-	struct resource *r;
-	bool no_clk_sleeping_in_ops;
 	int ret;
 
 	pwm = devm_kzalloc(&pdev->dev, sizeof(*pwm), GFP_KERNEL);
@@ -269,27 +261,30 @@ static int tegra_pwm_probe(struct platform_device *pdev)
 	pwm->soc = of_device_get_match_data(&pdev->dev);
 	pwm->dev = &pdev->dev;
 
-	r = platform_get_resource(pdev, IORESOURCE_MEM, 0);
-	pwm->regs = devm_ioremap_resource(&pdev->dev, r);
+	pwm->regs = devm_platform_ioremap_resource(pdev, 0);
 	if (IS_ERR(pwm->regs))
 		return PTR_ERR(pwm->regs);
 
 	platform_set_drvdata(pdev, pwm);
 
-	no_clk_sleeping_in_ops = of_property_read_bool(pdev->dev.of_node,
-			"nvidia,no-clk-sleeping-in-ops");
-	dev_info(&pdev->dev, "PWM clk can%s sleep in ops\n",
-			no_clk_sleeping_in_ops ? "not" : "");
-
 	pwm->clk = devm_clk_get(&pdev->dev, NULL);
 	if (IS_ERR(pwm->clk))
 		return PTR_ERR(pwm->clk);
 
+	ret = devm_tegra_core_dev_init_opp_table_common(&pdev->dev);
+	if (ret)
+		return ret;
+
+	pm_runtime_enable(&pdev->dev);
+	ret = pm_runtime_resume_and_get(&pdev->dev);
+	if (ret)
+		return ret;
+
 	/* Set maximum frequency of the IP */
-	ret = clk_set_rate(pwm->clk, pwm->soc->max_frequency);
+	ret = dev_pm_opp_set_rate(pwm->dev, pwm->soc->max_frequency);
 	if (ret < 0) {
 		dev_err(&pdev->dev, "Failed to set max frequency: %d\n", ret);
-		return ret;
+		goto put_pm;
 	}
 
 	/*
@@ -302,72 +297,81 @@ static int tegra_pwm_probe(struct platform_device *pdev)
 	/* Set minimum limit of PWM period for the IP */
 	pwm->min_period_ns =
 	    (NSEC_PER_SEC / (pwm->soc->max_frequency >> PWM_DUTY_WIDTH)) + 1;
-	if (no_clk_sleeping_in_ops) {
-		ret = clk_prepare(pwm->clk);
-		if (ret) {
-			dev_err(&pdev->dev, "PWM clock prepare failed\n");
-			return ret;
-		}
-		pwm->clk_enable = clk_enable;
-		pwm->clk_disable = clk_disable;
-	} else {
-		pwm->clk_enable = clk_prepare_enable;
-		pwm->clk_disable = clk_disable_unprepare;
-	}
 
 	pwm->rst = devm_reset_control_get_exclusive(&pdev->dev, "pwm");
 	if (IS_ERR(pwm->rst)) {
 		ret = PTR_ERR(pwm->rst);
 		dev_err(&pdev->dev, "Reset control is not found: %d\n", ret);
-		return ret;
+		goto put_pm;
 	}
 
 	reset_control_deassert(pwm->rst);
 
 	pwm->chip.dev = &pdev->dev;
 	pwm->chip.ops = &tegra_pwm_ops;
-	pwm->chip.base = -1;
 	pwm->chip.npwm = pwm->soc->num_channels;
 
 	ret = pwmchip_add(&pwm->chip);
 	if (ret < 0) {
 		dev_err(&pdev->dev, "pwmchip_add() failed: %d\n", ret);
 		reset_control_assert(pwm->rst);
-		return ret;
+		goto put_pm;
 	}
 
 	return 0;
+
+put_pm:
+	pm_runtime_put_sync_suspend(&pdev->dev);
+	pm_runtime_force_suspend(&pdev->dev);
+	return ret;
 }
 
 static int tegra_pwm_remove(struct platform_device *pdev)
 {
 	struct tegra_pwm_chip *pc = platform_get_drvdata(pdev);
-	int err;
 
-	if (WARN_ON(!pc))
-		return -ENODEV;
-
-	err = pc->clk_enable(pc->clk);
-	if (err < 0)
-		return err;
+	pwmchip_remove(&pc->chip);
 
 	reset_control_assert(pc->rst);
+
+	pm_runtime_force_suspend(&pdev->dev);
+
+	return 0;
+}
+
+static int __maybe_unused tegra_pwm_runtime_suspend(struct device *dev)
+{
+	struct tegra_pwm_chip *pc = dev_get_drvdata(dev);
+	int err;
+
 	clk_disable_unprepare(pc->clk);
 
-	return pwmchip_remove(&pc->chip);
+	err = pinctrl_pm_select_sleep_state(dev);
+	if (err) {
+		clk_prepare_enable(pc->clk);
+		return err;
+	}
+
+	return 0;
 }
 
-#ifdef CONFIG_PM_SLEEP
-static int tegra_pwm_suspend(struct device *dev)
+static int __maybe_unused tegra_pwm_runtime_resume(struct device *dev)
 {
-	return pinctrl_pm_select_sleep_state(dev);
-}
+	struct tegra_pwm_chip *pc = dev_get_drvdata(dev);
+	int err;
 
-static int tegra_pwm_resume(struct device *dev)
-{
-	return pinctrl_pm_select_default_state(dev);
+	err = pinctrl_pm_select_default_state(dev);
+	if (err)
+		return err;
+
+	err = clk_prepare_enable(pc->clk);
+	if (err) {
+		pinctrl_pm_select_sleep_state(dev);
+		return err;
+	}
+
+	return 0;
 }
-#endif
 
 static const struct tegra_pwm_soc tegra20_pwm_soc = {
 	.num_channels = 4,
@@ -393,7 +397,10 @@ static const struct of_device_id tegra_pwm_of_match[] = {
 MODULE_DEVICE_TABLE(of, tegra_pwm_of_match);
 
 static const struct dev_pm_ops tegra_pwm_pm_ops = {
-	SET_SYSTEM_SLEEP_PM_OPS(tegra_pwm_suspend, tegra_pwm_resume)
+	SET_RUNTIME_PM_OPS(tegra_pwm_runtime_suspend, tegra_pwm_runtime_resume,
+				NULL)
+	SET_SYSTEM_SLEEP_PM_OPS(pm_runtime_force_suspend,
+				pm_runtime_force_resume)
 };
 
 static struct platform_driver tegra_pwm_driver = {

@@ -96,9 +96,6 @@ static int snd_ctl_elem_info_compat(struct snd_ctl_file *ctl,
 	if (get_user(data->value.enumerated.item, &data32->value.enumerated.item))
 		goto error;
 
-	err = snd_power_wait(ctl->card, SNDRV_CTL_POWER_D0);
-	if (err < 0)
-		goto error;
 	err = snd_ctl_elem_info(ctl, data);
 	if (err < 0)
 		goto error;
@@ -187,7 +184,10 @@ static int get_ctl_type(struct snd_card *card, struct snd_ctl_elem_id *id,
 		return -ENOMEM;
 	}
 	info->id = *id;
-	err = kctl->info(kctl, info);
+	err = snd_power_ref_and_wait(card);
+	if (!err)
+		err = kctl->info(kctl, info);
+	snd_power_unref(card);
 	up_read(&card->controls_rwsem);
 	if (err >= 0) {
 		err = info->type;
@@ -278,11 +278,6 @@ static int copy_ctl_value_to_user(void __user *userdata,
 		}
 	} else {
 		size = get_elem_size(type, count);
-		if (size < 0) {
-			pr_err("snd_ioctl32_ctl_elem_value: unknown type %d\n", type);
-			return -EINVAL;
-		}
-
 		if (copy_to_user(valuep, data->value.bytes.data, size))
 			return -EFAULT;
 	}
@@ -306,9 +301,6 @@ static int ctl_elem_read_user(struct snd_card *card,
 	if (err < 0)
 		goto error;
 
-	err = snd_power_wait(card, SNDRV_CTL_POWER_D0);
-	if (err < 0)
-		goto error;
 	err = snd_ctl_elem_read(card, data);
 	if (err < 0)
 		goto error;
@@ -334,9 +326,6 @@ static int ctl_elem_write_user(struct snd_ctl_file *file,
 	if (err < 0)
 		goto error;
 
-	err = snd_power_wait(card, SNDRV_CTL_POWER_D0);
-	if (err < 0)
-		goto error;
 	err = snd_ctl_elem_write(card, file, data);
 	if (err < 0)
 		goto error;

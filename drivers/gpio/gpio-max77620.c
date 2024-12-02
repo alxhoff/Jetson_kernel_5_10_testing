@@ -2,7 +2,7 @@
 /*
  * MAXIM MAX77620 GPIO driver
  *
- * Copyright (c) 2016-2020, NVIDIA CORPORATION.  All rights reserved.
+ * Copyright (c) 2016, NVIDIA CORPORATION.  All rights reserved.
  */
 
 #include <linux/gpio/driver.h>
@@ -325,7 +325,7 @@ static int max77620_gpio_probe(struct platform_device *pdev)
 	girq->parents = NULL;
 	girq->default_type = IRQ_TYPE_NONE;
 	girq->handler = handle_edge_irq;
-	girq->init_hw = max77620_gpio_irq_init_hw,
+	girq->init_hw = max77620_gpio_irq_init_hw;
 	girq->threaded = true;
 
 	platform_set_drvdata(pdev, mgpio);
@@ -360,17 +360,7 @@ static struct platform_driver max77620_gpio_driver = {
 	.id_table	= max77620_gpio_devtype,
 };
 
-static int __init max77620_gpio_init(void)
-{
-	return platform_driver_register(&max77620_gpio_driver);
-}
-subsys_initcall(max77620_gpio_init);
-
-static void __exit max77620_gpio_exit(void)
-{
-	return platform_driver_unregister(&max77620_gpio_driver);
-}
-module_exit(max77620_gpio_exit);
+module_platform_driver(max77620_gpio_driver);
 
 MODULE_DESCRIPTION("GPIO interface for MAX77620 and MAX20024 PMIC");
 MODULE_AUTHOR("Laxman Dewangan <ldewangan@nvidia.com>");

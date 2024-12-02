@@ -18,8 +18,6 @@ enum alarmtimer_type {
 	/* Used for tracing information. No usable types. */
 	ALARM_REALTIME_FREEZER,
 	ALARM_BOOTTIME_FREEZER,
-
-	ALARM_UNDEFINED
 };
 
 enum alarmtimer_restart {

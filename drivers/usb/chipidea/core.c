@@ -195,7 +195,7 @@ static void hw_wait_phy_stable(void)
 }
 
 /* The PHY enters/leaves low power mode */
-static void ci_hdrc_enter_lpm(struct ci_hdrc *ci, bool enable)
+static void ci_hdrc_enter_lpm_common(struct ci_hdrc *ci, bool enable)
 {
 	enum ci_hw_regs reg = ci->hw_bank.lpm ? OP_DEVLC : OP_PORTSC;
 	bool lpm = !!(hw_read(ci, reg, PORTSC_PHCD(ci->hw_bank.lpm)));
@@ -206,6 +206,11 @@ static void ci_hdrc_enter_lpm(struct ci_hdrc *ci, bool enable)
 	else if (!enable && lpm)
 		hw_write(ci, reg, PORTSC_PHCD(ci->hw_bank.lpm),
 				0);
+}
+
+static void ci_hdrc_enter_lpm(struct ci_hdrc *ci, bool enable)
+{
+	return ci->platdata->enter_lpm(ci, enable);
 }
 
 static int hw_device_init(struct ci_hdrc *ci, void __iomem *base)
@@ -330,7 +335,7 @@ static int _ci_usb_phy_init(struct ci_hdrc *ci)
 }
 
 /**
- * _ci_usb_phy_exit: deinitialize phy taking in account both phy and usb_phy
+ * ci_usb_phy_exit: deinitialize phy taking in account both phy and usb_phy
  * interfaces
  * @ci: the controller
  */
@@ -516,6 +521,13 @@ static irqreturn_t ci_irq_handler(int irq, void *data)
 	u32 otgsc = 0;
 
 	if (ci->in_lpm) {
+		/*
+		 * If we already have a wakeup irq pending there,
+		 * let's just return to wait resume finished firstly.
+		 */
+		if (ci->wakeup_int)
+			return IRQ_HANDLED;
+
 		disable_irq_nosync(irq);
 		ci->wakeup_int = true;
 		pm_runtime_get(ci->dev);
@@ -799,6 +811,9 @@ static int ci_get_platdata(struct device *dev,
 			platdata->pins_device = p;
 	}
 
+	if (!platdata->enter_lpm)
+		platdata->enter_lpm = ci_hdrc_enter_lpm_common;
+
 	return 0;
 }
 
@@ -966,8 +981,15 @@ static ssize_t role_store(struct device *dev,
 			     strlen(ci->roles[role]->name)))
 			break;
 
-	if (role == CI_ROLE_END || role == ci->role)
+	if (role == CI_ROLE_END)
 		return -EINVAL;
+
+	mutex_lock(&ci->mutex);
+
+	if (role == ci->role) {
+		mutex_unlock(&ci->mutex);
+		return n;
+	}
 
 	pm_runtime_get_sync(dev);
 	disable_irq(ci->irq);
@@ -977,6 +999,7 @@ static ssize_t role_store(struct device *dev,
 		ci_handle_vbus_change(ci);
 	enable_irq(ci->irq);
 	pm_runtime_put_sync(dev);
+	mutex_unlock(&ci->mutex);
 
 	return (ret == 0) ? n : ret;
 }
@@ -1012,6 +1035,7 @@ static int ci_hdrc_probe(struct platform_device *pdev)
 		return -ENOMEM;
 
 	spin_lock_init(&ci->lock);
+	mutex_init(&ci->mutex);
 	ci->dev = dev;
 	ci->platdata = dev_get_platdata(dev);
 	ci->imx28_write_fix = !!(ci->platdata->flags &
@@ -1081,7 +1105,7 @@ static int ci_hdrc_probe(struct platform_device *pdev)
 	ret = ci_usb_phy_init(ci);
 	if (ret) {
 		dev_err(dev, "unable to init phy: %d\n", ret);
-		return ret;
+		goto ulpi_exit;
 	}
 
 	ci->hw_bank.phys = res->start;

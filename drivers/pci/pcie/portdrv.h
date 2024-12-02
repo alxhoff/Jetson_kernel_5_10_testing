@@ -85,6 +85,8 @@ struct pcie_port_service_driver {
 	int (*runtime_suspend)(struct pcie_device *dev);
 	int (*runtime_resume)(struct pcie_device *dev);
 
+	int (*slot_reset)(struct pcie_device *dev);
+
 	/* Device driver may resume normal operations */
 	void (*error_resume)(struct pci_dev *dev);
 
@@ -110,6 +112,7 @@ void pcie_port_service_unregister(struct pcie_port_service_driver *new);
 
 extern struct bus_type pcie_port_bus_type;
 int pcie_port_device_register(struct pci_dev *dev);
+int pcie_port_device_iter(struct device *dev, void *data);
 #ifdef CONFIG_PM
 int pcie_port_device_suspend(struct device *dev);
 int pcie_port_device_resume_noirq(struct device *dev);
@@ -124,12 +127,22 @@ void pcie_port_bus_unregister(void);
 struct pci_dev;
 
 #ifdef CONFIG_PCIE_PME
-void pcie_pme_disable_msi(void);
-bool pcie_pme_no_msi(void);
+extern bool pcie_pme_msi_disabled;
+
+static inline void pcie_pme_disable_msi(void)
+{
+	pcie_pme_msi_disabled = true;
+}
+
+static inline bool pcie_pme_no_msi(void)
+{
+	return pcie_pme_msi_disabled;
+}
+
 void pcie_pme_interrupt_enable(struct pci_dev *dev, bool enable);
 #else /* !CONFIG_PCIE_PME */
 static inline void pcie_pme_disable_msi(void) {}
-static inline bool pcie_pme_no_msi(void) {}
+static inline bool pcie_pme_no_msi(void) { return false; }
 static inline void pcie_pme_interrupt_enable(struct pci_dev *dev, bool en) {}
 #endif /* !CONFIG_PCIE_PME */
 

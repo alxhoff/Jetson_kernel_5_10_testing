@@ -42,8 +42,8 @@ extern bool usb_endpoint_is_ignored(struct usb_device *udev,
 		struct usb_endpoint_descriptor *epd);
 extern int usb_remove_device(struct usb_device *udev);
 
-extern int usb_get_device_descriptor(struct usb_device *dev,
-		unsigned int size);
+extern struct usb_device_descriptor *usb_get_device_descriptor(
+		struct usb_device *udev);
 extern int usb_set_isoch_delay(struct usb_device *dev);
 extern int usb_get_bos_descriptor(struct usb_device *dev);
 extern void usb_release_bos_descriptor(struct usb_device *dev);
@@ -70,6 +70,8 @@ extern void usb_kick_hub_wq(struct usb_device *dev);
 extern int usb_match_one_id_intf(struct usb_device *dev,
 				 struct usb_host_interface *intf,
 				 const struct usb_device_id *id);
+extern int usb_match_device(struct usb_device *dev,
+			    const struct usb_device_id *id);
 extern const struct usb_device_id *usb_device_match_id(struct usb_device *udev,
 				const struct usb_device_id *id);
 extern bool usb_driver_applicable(struct usb_device *udev,

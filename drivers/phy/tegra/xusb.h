@@ -1,6 +1,6 @@
 /* SPDX-License-Identifier: GPL-2.0-only */
 /*
- * Copyright (c) 2014-2022, NVIDIA CORPORATION.  All rights reserved.
+ * Copyright (c) 2014-2023, NVIDIA CORPORATION.  All rights reserved.
  * Copyright (c) 2015, Google Inc.
  */
 
@@ -68,7 +68,7 @@ to_usb3_lane(struct tegra_xusb_lane *lane)
 struct tegra_xusb_usb2_lane {
 	struct tegra_xusb_lane base;
 
-	s32 hs_curr_level_offset;
+	u32 hs_curr_level_offset;
 	bool powered_on;
 };
 
@@ -364,8 +364,6 @@ struct tegra_xusb_usb3_port {
 	unsigned int port;
 	bool internal;
 	bool disable_gen2;
-	bool clamp_en_early_enabled;
-	bool receiver_detector_disabled;
 
 	u32 tap1;
 	u32 amp;
@@ -383,7 +381,6 @@ struct tegra_xusb_usb3_port *
 tegra_xusb_find_usb3_port(struct tegra_xusb_padctl *padctl,
 			  unsigned int index);
 void tegra_xusb_usb3_port_release(struct tegra_xusb_port *port);
-void tegra_xusb_usb3_port_remove(struct tegra_xusb_port *port);
 
 struct tegra_xusb_port_ops {
 	void (*release)(struct tegra_xusb_port *port);
@@ -412,13 +409,10 @@ struct tegra_xusb_padctl_ops {
 			     unsigned int index, bool idle);
 	int (*usb3_set_lfps_detect)(struct tegra_xusb_padctl *padctl,
 				    unsigned int index, bool enable);
-	int (*vbus_power_on)(struct phy *phy);
-	int (*vbus_power_off)(struct phy *phy);
+	int (*vbus_override)(struct tegra_xusb_padctl *padctl, bool set);
+	int (*utmi_port_reset)(struct phy *phy);
 	void (*utmi_pad_power_on)(struct phy *phy);
 	void (*utmi_pad_power_down)(struct phy *phy);
-	int (*utmi_port_reset)(struct phy *phy);
-	void (*receiver_detector)(struct phy *phy, bool on);
-	void (*clamp_en_early)(struct phy *phy, bool on);
 };
 
 struct tegra_xusb_padctl_soc {
@@ -438,10 +432,9 @@ struct tegra_xusb_padctl_soc {
 	unsigned int num_supplies;
 	bool supports_gen2;
 	bool need_fake_usb3_port;
-	bool port_cap_quirk;
 	bool poll_trk_completed;
 	bool trk_hw_mode;
-	bool supports_vbus_id_map;
+	bool supports_lp_cfg_en;
 };
 
 struct tegra_xusb_padctl {
@@ -463,8 +456,6 @@ struct tegra_xusb_padctl {
 	struct list_head pads;
 
 	unsigned int enable;
-	bool is_xhci_iov;
-	bool is_disable_regulator;
 
 	struct clk *clk;
 
@@ -492,10 +483,8 @@ static inline u32 padctl_readl_poll(struct tegra_xusb_padctl *padctl,
 	u32 regval;
 	int err;
 
-	err = readl_poll_timeout_atomic(padctl->regs + offset, regval,
+	err = readl_poll_timeout(padctl->regs + offset, regval,
 					 (regval & mask) == val, 1, us);
-	dev_dbg(padctl->dev, "%08lx poll > %08x, %d\n", offset,
-		regval, err);
 	if (err) {
 		dev_err(padctl->dev, "%08lx poll timeout > %08x\n", offset,
 			regval);
@@ -522,9 +511,6 @@ extern const struct tegra_xusb_padctl_soc tegra194_xusb_padctl_soc;
 #endif
 #if defined(CONFIG_ARCH_TEGRA_234_SOC)
 extern const struct tegra_xusb_padctl_soc tegra234_xusb_padctl_soc;
-#endif
-#if defined(CONFIG_ARCH_TEGRA_239_SOC)
-extern const struct tegra_xusb_padctl_soc tegra239_xusb_padctl_soc;
 #endif
 
 #endif /* __PHY_TEGRA_XUSB_H */

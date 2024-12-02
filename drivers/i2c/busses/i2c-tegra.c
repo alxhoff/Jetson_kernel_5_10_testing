@@ -4,8 +4,6 @@
  *
  * Copyright (C) 2010 Google, Inc.
  * Author: Colin Cross <ccross@android.com>
- *
- * Copyright (C) 2020-2022 NVIDIA Corporation. All rights reserved.
  */
 
 #include <linux/bitfield.h>
@@ -28,8 +26,9 @@
 #include <linux/platform_device.h>
 #include <linux/pm_runtime.h>
 #include <linux/reset.h>
-#include <linux/tegra_prod.h>
 #include <linux/tegra-epl.h>
+#include <linux/tegra-hsierrrptinj.h>
+#include <linux/tegra_prod.h>
 
 #define BYTES_PER_FIFO_WORD 4
 
@@ -85,18 +84,15 @@
 #define PACKET_HEADER0_HEADER_SIZE		GENMASK(29, 28)
 #define PACKET_HEADER0_PACKET_ID		GENMASK(23, 16)
 #define PACKET_HEADER0_CONT_ID			GENMASK(15, 12)
-#define PACKET_HEADER0_CONT_ID_MASK		0xF
 #define PACKET_HEADER0_PROTOCOL			GENMASK(7, 4)
 #define PACKET_HEADER0_PROTOCOL_I2C		1
 
-#define I2C_HEADER_HIGHSPEED_MODE		BIT(22)
 #define I2C_HEADER_CONT_ON_NAK			BIT(21)
 #define I2C_HEADER_READ				BIT(19)
 #define I2C_HEADER_10BIT_ADDR			BIT(18)
 #define I2C_HEADER_IE_ENABLE			BIT(17)
 #define I2C_HEADER_REPEAT_START			BIT(16)
 #define I2C_HEADER_CONTINUE_XFER		BIT(15)
-#define I2C_HEADER_MASTER_ADDR_SHIFT		12
 #define I2C_HEADER_SLAVE_ADDR_SHIFT		1
 
 #define I2C_BUS_CLEAR_CNFG			0x084
@@ -114,11 +110,8 @@
 #define I2C_MST_CORE_CLKEN_OVR			BIT(0)
 
 #define I2C_INTERFACE_TIMING_0			0x094
-#define  I2C_INTERFACE_TIMING_THIGH		GENMASK(13, 8)
-#define  I2C_INTERFACE_TIMING_TLOW		GENMASK(5, 0)
-#define  I2C_INTERFACE_TIMING_THIGH_NEW		GENMASK(15, 8)
-#define  I2C_INTERFACE_TIMING_TLOW_NEW		GENMASK(7, 0)
-
+#define  I2C_INTERFACE_TIMING_THIGH		GENMASK(15, 8)
+#define  I2C_INTERFACE_TIMING_TLOW		GENMASK(7, 0)
 #define I2C_INTERFACE_TIMING_1			0x098
 #define  I2C_INTERFACE_TIMING_TBUF		GENMASK(29, 24)
 #define  I2C_INTERFACE_TIMING_TSU_STO		GENMASK(21, 16)
@@ -126,17 +119,12 @@
 #define  I2C_INTERFACE_TIMING_TSU_STA		GENMASK(5, 0)
 
 #define I2C_HS_INTERFACE_TIMING_0		0x09c
-#define  I2C_HS_INTERFACE_TIMING_THIGH		GENMASK(13, 8)
-#define  I2C_HS_INTERFACE_TIMING_TLOW		GENMASK(5, 0)
-#define  I2C_HS_INTERFACE_TIMING_THIGH_NEW	GENMASK(15, 8)
-#define  I2C_HS_INTERFACE_TIMING_TLOW_NEW	GENMASK(7, 0)
-
+#define  I2C_HS_INTERFACE_TIMING_THIGH		GENMASK(15, 8)
+#define  I2C_HS_INTERFACE_TIMING_TLOW		GENMASK(7, 0)
 #define I2C_HS_INTERFACE_TIMING_1		0x0a0
 #define  I2C_HS_INTERFACE_TIMING_TSU_STO	GENMASK(21, 16)
 #define  I2C_HS_INTERFACE_TIMING_THD_STA	GENMASK(13, 8)
 #define  I2C_HS_INTERFACE_TIMING_TSU_STA	GENMASK(5, 0)
-
-#define I2C_MASTER_RESET_CONTROL		0x0A8
 
 #define I2C_MST_FIFO_CONTROL			0x0b4
 #define I2C_MST_FIFO_CONTROL_RX_FLUSH		BIT(0)
@@ -148,21 +136,8 @@
 #define I2C_MST_FIFO_STATUS_TX			GENMASK(23, 16)
 #define I2C_MST_FIFO_STATUS_RX			GENMASK(7, 0)
 
-#define I2C_BUS_STATUS				0xd0
-#define I2C_BUS_STATUS_SDA			BIT(1)
-#define I2C_BUS_STATUS_SDA_LOW			0
-#define I2C_BUS_STATUS_SDA_HIGH			1
-#define I2C_BUS_STATUS_SCL			BIT(2)
-#define I2C_BUS_STATUS_SCL_LOW			0
-#define I2C_BUS_STATUS_SCL_HIGH			1
-
 /* configuration load timeout in microseconds */
 #define I2C_CONFIG_LOAD_TIMEOUT			1000000
-
-#define I2C_STANDARD_MODE			100000
-#define I2C_FAST_MODE				400000
-#define I2C_FAST_PLUS_MODE			1000000
-#define I2C_HS_MODE				3500000
 
 /* packet header size in bytes */
 #define I2C_PACKET_HEADER_SIZE			12
@@ -174,7 +149,6 @@
  * I2C_PACKET_HEADER_SIZE.
  */
 #define I2C_PIO_MODE_PREFERRED_LEN		32
-
 
 /*
  * msg_end_type: The bus control which needs to be sent at end of transfer.
@@ -238,29 +212,20 @@ struct tegra_i2c_hw_feature {
 	u32 clk_divisor_std_mode;
 	u32 clk_divisor_fast_mode;
 	u32 clk_divisor_fast_plus_mode;
-	u32 clk_multiplier_hs_mode;
 	bool has_multi_master_mode;
 	bool has_slcg_override_reg;
-	bool has_sw_reset_reg;
 	bool has_mst_fifo;
 	const struct i2c_adapter_quirks *quirks;
 	bool supports_bus_clear;
-	bool has_reg_write_buffering;
-	bool has_slcg_support;
-	bool has_hs_mode_support;
 	bool has_apb_dma;
 	u32 tlow_std_mode;
 	u32 thigh_std_mode;
 	u32 tlow_fast_fastplus_mode;
 	u32 thigh_fast_fastplus_mode;
-	u32 tlow_hs_mode;
-	u32 thigh_hs_mode;
 	u32 setup_hold_time_std_mode;
 	u32 setup_hold_time_fast_fast_plus_mode;
 	u32 setup_hold_time_hs_mode;
 	bool has_interface_timing_reg;
-	bool interface_timing_enhancement;
-	bool has_gpc_dma;
 };
 
 /**
@@ -318,24 +283,12 @@ struct tegra_i2c_dev {
 	u32 msg_err_time;
 	u16 epl_reporter_id;
 	u8 *msg_buf;
-	u16 clk_divisor_non_hs_mode;
-	bool is_periph_reset_done;
 
 	struct completion dma_complete;
+	struct tegra_prod *prod_list;
 	struct dma_chan *tx_dma_chan;
 	struct dma_chan *rx_dma_chan;
 	unsigned int dma_buf_size;
-	bool is_curr_dma_xfer;
-	bool is_curr_atomic_xfer;
-	int clk_divisor_hs_mode;
-	u16 hs_master_code;
-	u32 low_clock_count;
-	u32 high_clock_count;
-	u32 hs_low_clock_count;
-	u32 hs_high_clock_count;
-	struct tegra_prod *prod_list;
-	bool disable_dma_mode;
-	bool is_clkon_always;
 	dma_addr_t dma_phys;
 	void *dma_buf;
 
@@ -345,11 +298,7 @@ struct tegra_i2c_dev {
 	bool msg_read;
 	bool is_dvc;
 	bool is_vi;
-	bool reinit_ctrl_before_xfer;
 };
-
-static int __maybe_unused tegra_i2c_runtime_resume(struct device *dev);
-static int __maybe_unused tegra_i2c_runtime_suspend(struct device *dev);
 
 static void dvc_writel(struct tegra_i2c_dev *i2c_dev, u32 val,
 		       unsigned int reg)
@@ -381,13 +330,10 @@ static void i2c_writel(struct tegra_i2c_dev *i2c_dev, u32 val, unsigned int reg)
 	writel_relaxed(val, i2c_dev->base + tegra_i2c_reg_addr(i2c_dev, reg));
 
 	/* read back register to make sure that register writes completed */
-	if (i2c_dev->hw->has_reg_write_buffering) {
-		if (reg != I2C_TX_FIFO)
-			readl(i2c_dev->base + tegra_i2c_reg_addr(i2c_dev, reg));
-		else if (i2c_dev->is_vi)
-			readl_relaxed(i2c_dev->base +
-				tegra_i2c_reg_addr(i2c_dev, I2C_INT_STATUS));
-	}
+	if (reg != I2C_TX_FIFO)
+		readl_relaxed(i2c_dev->base + tegra_i2c_reg_addr(i2c_dev, reg));
+	else if (i2c_dev->is_vi)
+		readl_relaxed(i2c_dev->base + tegra_i2c_reg_addr(i2c_dev, I2C_INT_STATUS));
 }
 
 static u32 i2c_readl(struct tegra_i2c_dev *i2c_dev, unsigned int reg)
@@ -502,24 +448,16 @@ static int tegra_i2c_init_dma(struct tegra_i2c_dev *i2c_dev)
 	u32 *dma_buf;
 	int err;
 
-	if (i2c_dev->hw->has_gpc_dma) {
-		if (!IS_ENABLED(CONFIG_TEGRA_GPC_DMA)) {
-			dev_dbg(i2c_dev->dev, "Support for GPC DMA not enabled!\n");
-			return 0;
-		}
-	} else if (i2c_dev->hw->has_apb_dma) {
-		if (!IS_ENABLED(CONFIG_TEGRA20_APB_DMA)) {
-			dev_dbg(i2c_dev->dev, "Support for APB DMA not enabled!\n");
-			return 0;
-		}
-	} else {
-		dev_dbg(i2c_dev->dev, "DMA is not enabled!\n");
-		if (!i2c_dev->hw->has_apb_dma || i2c_dev->is_vi)
-			return 0;
-	}
+	if (i2c_dev->is_vi)
+		return 0;
 
-	if (!IS_ENABLED(CONFIG_TEGRA20_APB_DMA)) {
-		dev_dbg(i2c_dev->dev, "DMA support not enabled\n");
+	if (i2c_dev->hw->has_apb_dma) {
+		if (!IS_ENABLED(CONFIG_TEGRA20_APB_DMA)) {
+			dev_dbg(i2c_dev->dev, "APB DMA support not enabled\n");
+			return 0;
+		}
+	} else if (!IS_ENABLED(CONFIG_TEGRA186_GPC_DMA)) {
+		dev_dbg(i2c_dev->dev, "GPC DMA support not enabled\n");
 		return 0;
 	}
 
@@ -623,7 +561,7 @@ static int tegra_i2c_poll_register(struct tegra_i2c_dev *i2c_dev,
 	void __iomem *addr = i2c_dev->base + tegra_i2c_reg_addr(i2c_dev, reg);
 	u32 val;
 
-	if (!i2c_dev->atomic_mode && !in_irq())
+	if (!i2c_dev->atomic_mode)
 		return readl_relaxed_poll_timeout(addr, val, !(val & mask),
 						  delay_us, timeout_us);
 
@@ -659,38 +597,6 @@ static int tegra_i2c_flush_fifos(struct tegra_i2c_dev *i2c_dev)
 	return 0;
 }
 
-static void tegra_i2c_config_prod_settings(struct tegra_i2c_dev *i2c_dev)
-{
-	char *prod_name;
-	int ret;
-
-	switch (i2c_dev->bus_clk_rate) {
-	case I2C_FAST_MODE:
-		prod_name = "prod_c_fm";
-		break;
-	case I2C_FAST_PLUS_MODE:
-		prod_name = "prod_c_fmplus";
-		break;
-	case I2C_HS_MODE:
-		prod_name = "prod_c_hs";
-		break;
-	case I2C_STANDARD_MODE:
-	default:
-		prod_name = "prod_c_sm";
-		break;
-	}
-
-	ret = tegra_prod_set_by_name(&i2c_dev->base, "prod",
-				     i2c_dev->prod_list);
-	if (ret == 0)
-		dev_dbg(i2c_dev->dev, "setting default prod\n");
-
-	ret = tegra_prod_set_by_name(&i2c_dev->base, prod_name,
-				     i2c_dev->prod_list);
-	if (ret == 0)
-		dev_dbg(i2c_dev->dev, "setting prod: %s\n", prod_name);
-}
-
 static int tegra_i2c_wait_for_config_load(struct tegra_i2c_dev *i2c_dev)
 {
 	int err;
@@ -710,7 +616,39 @@ static int tegra_i2c_wait_for_config_load(struct tegra_i2c_dev *i2c_dev)
 	return 0;
 }
 
-static void tegra_i2c_set_clk_parameters(struct tegra_i2c_dev *i2c_dev)
+static void tegra_i2c_config_prod_settings(struct tegra_i2c_dev *i2c_dev)
+{
+	char *prod_name;
+	int ret;
+
+	switch (i2c_dev->bus_clk_rate) {
+	case I2C_MAX_FAST_MODE_PLUS_FREQ + 1 ... I2C_MAX_HIGH_SPEED_MODE_FREQ:
+		prod_name = "prod_c_hs";
+		break;
+	case I2C_MAX_FAST_MODE_FREQ + 1 ... I2C_MAX_FAST_MODE_PLUS_FREQ:
+		prod_name = "prod_c_fmplus";
+		break;
+	case I2C_MAX_STANDARD_MODE_FREQ + 1 ... I2C_MAX_FAST_MODE_FREQ:
+		prod_name = "prod_c_fm";
+		break;
+	case 0 ... I2C_MAX_STANDARD_MODE_FREQ:
+	default:
+		prod_name = "prod_c_sm";
+		break;
+	}
+
+	ret = tegra_prod_set_by_name(&i2c_dev->base, "prod",
+					i2c_dev->prod_list);
+	if (ret == 0)
+		dev_dbg(i2c_dev->dev, "setting default prod\n");
+
+	ret = tegra_prod_set_by_name(&i2c_dev->base, prod_name,
+				i2c_dev->prod_list);
+	if (ret == 0)
+		dev_dbg(i2c_dev->dev, "setting prod: %s\n", prod_name);
+}
+
+static void tegra_i2c_set_clk_params(struct tegra_i2c_dev *i2c_dev)
 {
 	u32 val, clk_divisor, tsu_thd, tlow, thigh, non_hs_mode;
 
@@ -735,47 +673,16 @@ static void tegra_i2c_set_clk_parameters(struct tegra_i2c_dev *i2c_dev)
 		break;
 	}
 
-	/* Make sure clock divisor programmed correctly */
-	if (i2c_dev->bus_clk_rate == I2C_HS_MODE) {
-		i2c_dev->clk_divisor_hs_mode = i2c_dev->hw->clk_divisor_hs_mode;
-		clk_divisor = FIELD_PREP(I2C_CLK_DIVISOR_HSMODE,
-			i2c_dev->hw->clk_divisor_hs_mode) |
-			FIELD_PREP(I2C_CLK_DIVISOR_STD_FAST_MODE, non_hs_mode);
-	} else {
-		val = i2c_readl(i2c_dev, I2C_CLK_DIVISOR);
-		clk_divisor = FIELD_PREP(I2C_CLK_DIVISOR_HSMODE, val) |
-			FIELD_PREP(I2C_CLK_DIVISOR_STD_FAST_MODE, non_hs_mode);
-	}
-
+	/* make sure clock divisor programmed correctly */
+	clk_divisor = FIELD_PREP(I2C_CLK_DIVISOR_HSMODE,
+				 i2c_dev->hw->clk_divisor_hs_mode) |
+		      FIELD_PREP(I2C_CLK_DIVISOR_STD_FAST_MODE, non_hs_mode);
 	i2c_writel(i2c_dev, clk_divisor, I2C_CLK_DIVISOR);
 
 	if (i2c_dev->hw->has_interface_timing_reg) {
-		if (i2c_dev->hw->interface_timing_enhancement) {
-			val = FIELD_PREP(I2C_INTERFACE_TIMING_THIGH_NEW, thigh) |
-				FIELD_PREP(I2C_INTERFACE_TIMING_TLOW_NEW, tlow);
-			i2c_writel(i2c_dev, val, I2C_INTERFACE_TIMING_0);
-		} else {
-			val = FIELD_PREP(I2C_INTERFACE_TIMING_THIGH, thigh) |
-				FIELD_PREP(I2C_INTERFACE_TIMING_TLOW, tlow);
-			i2c_writel(i2c_dev, val, I2C_INTERFACE_TIMING_0);
-		}
-	}
-
-	if (i2c_dev->hw->has_interface_timing_reg &&
-		i2c_dev->bus_clk_rate == I2C_HS_MODE) {
-		if (i2c_dev->hw->interface_timing_enhancement) {
-			val = FIELD_PREP(I2C_HS_INTERFACE_TIMING_THIGH_NEW,
-					i2c_dev->hw->thigh_hs_mode) |
-			      FIELD_PREP(I2C_HS_INTERFACE_TIMING_TLOW_NEW,
-					i2c_dev->hw->tlow_hs_mode);
-			i2c_writel(i2c_dev, val, I2C_HS_INTERFACE_TIMING_0);
-		} else {
-			val = FIELD_PREP(I2C_HS_INTERFACE_TIMING_THIGH,
-					i2c_dev->hw->thigh_hs_mode) |
-			      FIELD_PREP(I2C_HS_INTERFACE_TIMING_TLOW,
-					i2c_dev->hw->tlow_hs_mode);
-			i2c_writel(i2c_dev, val, I2C_HS_INTERFACE_TIMING_0);
-		}
+		val = FIELD_PREP(I2C_INTERFACE_TIMING_THIGH, thigh) |
+		      FIELD_PREP(I2C_INTERFACE_TIMING_TLOW, tlow);
+		i2c_writel(i2c_dev, val, I2C_INTERFACE_TIMING_0);
 	}
 
 	/*
@@ -784,86 +691,33 @@ static void tegra_i2c_set_clk_parameters(struct tegra_i2c_dev *i2c_dev)
 	 */
 	if (i2c_dev->hw->has_interface_timing_reg && tsu_thd)
 		i2c_writel(i2c_dev, tsu_thd, I2C_INTERFACE_TIMING_1);
-
-	if (i2c_dev->hw->has_interface_timing_reg &&
-		i2c_dev->bus_clk_rate == I2C_HS_MODE &&
-		i2c_dev->hw->setup_hold_time_hs_mode)
-		i2c_writel(i2c_dev, i2c_dev->hw->setup_hold_time_hs_mode,
-			I2C_HS_INTERFACE_TIMING_1);
 }
 
-static void tegra_i2c_get_clk_parameters(struct tegra_i2c_dev *i2c_dev)
+static int tegra_i2c_set_div_clk(struct tegra_i2c_dev *i2c_dev)
 {
-	u32 val;
+	u32 clk_multiplier, tlow, thigh, non_hs_mode;
+	u32 timing, clk_divisor;
+	int err;
 
-	val = i2c_readl(i2c_dev, I2C_INTERFACE_TIMING_0);
+	timing = i2c_readl(i2c_dev, I2C_INTERFACE_TIMING_0);
 
-	if (i2c_dev->hw->interface_timing_enhancement) {
-		i2c_dev->low_clock_count = FIELD_GET(
-					I2C_INTERFACE_TIMING_TLOW_NEW, val);
-		i2c_dev->high_clock_count = FIELD_GET(
-					I2C_INTERFACE_TIMING_THIGH_NEW, val);
-	} else {
-		i2c_dev->low_clock_count = FIELD_GET(
-					I2C_INTERFACE_TIMING_TLOW, val);
-		i2c_dev->high_clock_count = FIELD_GET(
-					I2C_INTERFACE_TIMING_THIGH, val);
+	tlow = FIELD_GET(I2C_INTERFACE_TIMING_TLOW, timing);
+	thigh = FIELD_GET(I2C_INTERFACE_TIMING_THIGH, timing);
+
+	clk_divisor = i2c_readl(i2c_dev, I2C_CLK_DIVISOR);
+
+	non_hs_mode = FIELD_GET(I2C_CLK_DIVISOR_STD_FAST_MODE, clk_divisor);
+
+	clk_multiplier = (tlow + thigh + 2) * (non_hs_mode + 1);
+
+	err = clk_set_rate(i2c_dev->div_clk,
+			   i2c_dev->bus_clk_rate * clk_multiplier);
+	if (err) {
+		dev_err(i2c_dev->dev, "failed to set div-clk rate: %d\n", err);
+		return err;
 	}
 
-	val = i2c_readl(i2c_dev, I2C_HS_INTERFACE_TIMING_0);
-	if (i2c_dev->hw->interface_timing_enhancement) {
-		i2c_dev->hs_low_clock_count = FIELD_GET(
-					I2C_HS_INTERFACE_TIMING_TLOW_NEW, val);
-		i2c_dev->hs_high_clock_count = FIELD_GET(
-					I2C_HS_INTERFACE_TIMING_THIGH_NEW, val);
-	} else {
-		i2c_dev->hs_low_clock_count = FIELD_GET(
-					I2C_HS_INTERFACE_TIMING_TLOW, val);
-		i2c_dev->hs_high_clock_count = FIELD_GET(
-					I2C_HS_INTERFACE_TIMING_THIGH, val);
-	}
-
-	val = i2c_readl(i2c_dev, I2C_CLK_DIVISOR);
-	i2c_dev->clk_divisor_hs_mode = FIELD_GET(I2C_CLK_DIVISOR_HSMODE, val);
-	i2c_dev->clk_divisor_non_hs_mode = FIELD_GET(
-					I2C_CLK_DIVISOR_STD_FAST_MODE, val);
-
-	dev_dbg(i2c_dev->dev, "tlow 0x%x, thigh 0x%x, hs_tlow 0x%x, "
-		"hs_thigh 0x%x, divisor 0x%x, divisor_hs 0x%x\n",
-		i2c_dev->low_clock_count, i2c_dev->high_clock_count,
-		i2c_dev->hs_low_clock_count, i2c_dev->hs_high_clock_count,
-		i2c_dev->clk_divisor_non_hs_mode, i2c_dev->clk_divisor_hs_mode);
-}
-
-static int tegra_i2c_set_clk_rate(struct tegra_i2c_dev *i2c_dev)
-{
-	u32 clk_multiplier = 0;
-	int ret = 0;
-
-	switch (i2c_dev->bus_clk_rate) {
-	case I2C_HS_MODE:
-		clk_multiplier = (i2c_dev->hs_low_clock_count +
-				i2c_dev->hs_high_clock_count + 2);
-		clk_multiplier *= (i2c_dev->clk_divisor_hs_mode + 1);
-		break;
-	case I2C_FAST_PLUS_MODE:
-	case I2C_STANDARD_MODE:
-	case I2C_FAST_MODE:
-	default:
-		clk_multiplier = (i2c_dev->low_clock_count +
-				  i2c_dev->high_clock_count + 2);
-		clk_multiplier *= (i2c_dev->clk_divisor_non_hs_mode + 1);
-		break;
-	}
-
-	ret = clk_set_rate(i2c_dev->div_clk,
-			i2c_dev->bus_clk_rate * clk_multiplier);
-	if (ret) {
-		dev_err(i2c_dev->dev, "Clock rate change failed %d\n", ret);
-		return ret;
-	}
-
-	return ret;
+	return 0;
 }
 
 static int tegra_i2c_init(struct tegra_i2c_dev *i2c_dev)
@@ -871,29 +725,6 @@ static int tegra_i2c_init(struct tegra_i2c_dev *i2c_dev)
 	u32 val;
 	int err;
 
-	if (!pm_runtime_enabled(i2c_dev->dev)) {
-		err = tegra_i2c_runtime_resume(i2c_dev->dev);
-		if (err < 0) {
-			dev_err(i2c_dev->dev, "runtime resume fail =%d\n", err);
-			return err;
-		}
-	} else {
-		err = pm_runtime_get_sync(i2c_dev->dev);
-		if (err < 0) {
-			dev_err(i2c_dev->dev, "runtime get sync resume fail :%d\n", err);
-			return err;
-		}
-	}
-	if (i2c_dev->hw->has_sw_reset_reg) {
-		if (i2c_dev->is_periph_reset_done) {
-			/* If already controller reset is done through */
-			/* clock reset control register, then use SW reset */
-			i2c_writel(i2c_dev, 1, I2C_MASTER_RESET_CONTROL);
-			udelay(2);
-			i2c_writel(i2c_dev, 0, I2C_MASTER_RESET_CONTROL);
-			goto skip_periph_reset;
-		}
-	}
 	/*
 	 * The reset shouldn't ever fail in practice. The failure will be a
 	 * sign of a severe problem that needs to be resolved. Still we don't
@@ -904,15 +735,12 @@ static int tegra_i2c_init(struct tegra_i2c_dev *i2c_dev)
 	 */
 	err = reset_control_reset(i2c_dev->rst);
 	WARN_ON_ONCE(err);
-	i2c_dev->is_periph_reset_done = true;
 
-skip_periph_reset:
 	if (i2c_dev->is_dvc)
 		tegra_dvc_init(i2c_dev);
 
-	val = I2C_CNFG_NEW_MASTER_FSM | I2C_CNFG_PACKET_MODE_EN;
-	if (i2c_dev->bus_clk_rate != I2C_HS_MODE)
-		val |= FIELD_PREP(I2C_CNFG_DEBOUNCE_CNT, 2);
+	val = I2C_CNFG_NEW_MASTER_FSM | I2C_CNFG_PACKET_MODE_EN |
+	      FIELD_PREP(I2C_CNFG_DEBOUNCE_CNT, 2);
 
 	if (i2c_dev->hw->has_multi_master_mode)
 		val |= I2C_CNFG_MULTI_MASTER_MODE;
@@ -923,18 +751,14 @@ skip_periph_reset:
 	if (i2c_dev->is_vi)
 		tegra_i2c_vi_init(i2c_dev);
 
-	tegra_i2c_set_clk_parameters(i2c_dev);
-
 	if (i2c_dev->prod_list)
 		tegra_i2c_config_prod_settings(i2c_dev);
+	else
+		tegra_i2c_set_clk_params(i2c_dev);
 
-	tegra_i2c_get_clk_parameters(i2c_dev);
-
-	err = tegra_i2c_set_clk_rate(i2c_dev);
-	if (err) {
-		dev_err(i2c_dev->dev, "failed to set div-clk rate: %d\n", err);
-		goto exit;
-	}
+	err = tegra_i2c_set_div_clk(i2c_dev);
+	if (err)
+		return err;
 
 	if (!i2c_dev->is_dvc && !i2c_dev->is_vi) {
 		u32 sl_cfg = i2c_readl(i2c_dev, I2C_SL_CNFG);
@@ -947,21 +771,16 @@ skip_periph_reset:
 
 	err = tegra_i2c_flush_fifos(i2c_dev);
 	if (err)
-		goto exit;
+		return err;
 
 	if (i2c_dev->multimaster_mode && i2c_dev->hw->has_slcg_override_reg)
 		i2c_writel(i2c_dev, I2C_MST_CORE_CLKEN_OVR, I2C_CLKEN_OVERRIDE);
 
 	err = tegra_i2c_wait_for_config_load(i2c_dev);
 	if (err)
-		goto exit;
+		return err;
 
-exit:
-	if (!pm_runtime_enabled(i2c_dev->dev))
-		tegra_i2c_runtime_suspend(i2c_dev->dev);
-	else
-		pm_runtime_put(i2c_dev->dev);
-	return err;
+	return 0;
 }
 
 static int tegra_i2c_disable_packet_mode(struct tegra_i2c_dev *i2c_dev)
@@ -1456,11 +1275,6 @@ static void tegra_i2c_push_packet_header(struct tegra_i2c_dev *i2c_dev,
 	if (msg->flags & I2C_M_RD)
 		packet_header |= I2C_HEADER_READ;
 
-	if (i2c_dev->bus_clk_rate == I2C_HS_MODE) {
-		packet_header |= I2C_HEADER_HIGHSPEED_MODE;
-		packet_header |= (i2c_dev->hs_master_code & 0x7)
-			<< I2C_HEADER_MASTER_ADDR_SHIFT;
-	}
 	if (i2c_dev->dma_mode && !i2c_dev->msg_read)
 		*dma_buf++ = packet_header;
 	else
@@ -1537,11 +1351,6 @@ static int tegra_i2c_xfer_msg(struct tegra_i2c_dev *i2c_dev,
 		return err;
 
 	i2c_dev->msg_buf = msg->buf;
-
-	/* The condition true implies smbus block read and len is already read */
-	if (msg->flags & I2C_M_RECV_LEN && end_state != MSG_END_CONTINUE)
-		i2c_dev->msg_buf = msg->buf + 1;
-
 	i2c_dev->msg_buf_remaining = msg->len;
 	i2c_dev->msg_read = !!(msg->flags & I2C_M_RD);
 	reinit_completion(&i2c_dev->msg_complete);
@@ -1675,75 +1484,17 @@ static int tegra_i2c_xfer_msg(struct tegra_i2c_dev *i2c_dev,
 	return 0;
 }
 
-static int tegra_i2c_change_clock_rate(struct tegra_i2c_dev *i2c_dev)
-{
-	u32 val;
-	int err;
-
-	val = I2C_CNFG_NEW_MASTER_FSM | I2C_CNFG_PACKET_MODE_EN;
-	if (i2c_dev->bus_clk_rate != I2C_HS_MODE)
-		val |= FIELD_PREP(I2C_CNFG_DEBOUNCE_CNT, 2);
-
-	if (i2c_dev->hw->has_multi_master_mode)
-		val |= I2C_CNFG_MULTI_MASTER_MODE;
-
-	i2c_writel(i2c_dev, val, I2C_CNFG);
-
-	tegra_i2c_set_clk_parameters(i2c_dev);
-
-	if (i2c_dev->prod_list)
-		tegra_i2c_config_prod_settings(i2c_dev);
-
-	tegra_i2c_get_clk_parameters(i2c_dev);
-
-	err = tegra_i2c_set_clk_rate(i2c_dev);
-	if (err) {
-		dev_err(i2c_dev->dev, "failed to set div-clk rate: %d\n", err);
-		return err;
-	}
-
-	err = tegra_i2c_wait_for_config_load(i2c_dev);
-	if (err)
-		return err;
-
-	return err;
-}
-
 static int tegra_i2c_xfer(struct i2c_adapter *adap, struct i2c_msg msgs[],
 			  int num)
 {
 	struct tegra_i2c_dev *i2c_dev = i2c_get_adapdata(adap);
 	int i, ret;
 
-	if (!pm_runtime_enabled(i2c_dev->dev)) {
-		ret = tegra_i2c_runtime_resume(i2c_dev->dev);
-		if (ret < 0) {
-			dev_err(i2c_dev->dev, "runtime resume fail =%d\n", ret);
-			return ret;
-		}
-	} else {
-		ret = pm_runtime_get_sync(i2c_dev->dev);
-		if (ret < 0) {
-			dev_err(i2c_dev->dev, "runtime resume failed %d\n", ret);
-			pm_runtime_put_noidle(i2c_dev->dev);
-			return ret;
-		}
-	}
-
-	if (i2c_dev->reinit_ctrl_before_xfer) {
-		ret = tegra_i2c_init(i2c_dev);
-		if (ret)
-			return ret;
-	}
-
-	if (adap->bus_clk_rate != i2c_dev->bus_clk_rate) {
-		i2c_dev->bus_clk_rate = adap->bus_clk_rate;
-		 tegra_i2c_change_clock_rate(i2c_dev);
-		 if (ret) {
-			 dev_err(i2c_dev->dev,
-					 "failed changing clock rate: %d\n", ret);
-			 return ret;
-		 }
+	ret = pm_runtime_get_sync(i2c_dev->dev);
+	if (ret < 0) {
+		dev_err(i2c_dev->dev, "runtime resume failed %d\n", ret);
+		pm_runtime_put_noidle(i2c_dev->dev);
+		return ret;
 	}
 
 	for (i = 0; i < num; i++) {
@@ -1756,24 +1507,12 @@ static int tegra_i2c_xfer(struct i2c_adapter *adap, struct i2c_msg msgs[],
 			else
 				end_type = MSG_END_REPEAT_START;
 		}
-		/* If M_RECV_LEN use ContinueXfer to read the first byte */
-		if (msgs[i].flags & I2C_M_RECV_LEN) {
-			ret = tegra_i2c_xfer_msg(i2c_dev, &msgs[i], MSG_END_CONTINUE);
-			if (ret)
-				break;
-			/* Set the read byte as msg len */
-			msgs[i].len = msgs[i].buf[0];
-			dev_dbg(i2c_dev->dev, "reading %d bytes\n", msgs[i].len);
-		}
 		ret = tegra_i2c_xfer_msg(i2c_dev, &msgs[i], end_type);
 		if (ret)
 			break;
 	}
 
-	if (!pm_runtime_enabled(i2c_dev->dev))
-		tegra_i2c_runtime_suspend(i2c_dev->dev);
-	else
-		pm_runtime_put(i2c_dev->dev);
+	pm_runtime_put(i2c_dev->dev);
 
 	return ret ?: i;
 }
@@ -1795,33 +1534,12 @@ static u32 tegra_i2c_func(struct i2c_adapter *adap)
 {
 	struct tegra_i2c_dev *i2c_dev = i2c_get_adapdata(adap);
 	u32 ret = I2C_FUNC_I2C | (I2C_FUNC_SMBUS_EMUL & ~I2C_FUNC_SMBUS_QUICK) |
-		  I2C_FUNC_10BIT_ADDR | I2C_FUNC_PROTOCOL_MANGLING;
+		  I2C_FUNC_10BIT_ADDR |	I2C_FUNC_PROTOCOL_MANGLING;
 
 	if (i2c_dev->hw->has_continue_xfer_support)
-		ret |= I2C_FUNC_NOSTART | I2C_FUNC_SMBUS_READ_BLOCK_DATA;
+		ret |= I2C_FUNC_NOSTART;
 
 	return ret;
-}
-
-static int tegra_i2c_bus_status(void *data, int *scl_status, int *sda_status)
-{
-	struct i2c_adapter *adap = (struct i2c_adapter *)data;
-	struct tegra_i2c_dev *i2c_dev = i2c_get_adapdata(adap);
-	u32 status;
-
-	status = i2c_readl(i2c_dev, I2C_BUS_STATUS);
-
-	if (status & I2C_BUS_STATUS_SDA)
-		*sda_status = I2C_BUS_STATUS_SDA_HIGH;
-	else
-		*sda_status = I2C_BUS_STATUS_SDA_LOW;
-
-	if (status & I2C_BUS_STATUS_SCL)
-		*scl_status = I2C_BUS_STATUS_SCL_HIGH;
-	else
-		*scl_status = I2C_BUS_STATUS_SCL_LOW;
-
-	return 0;
 }
 
 static const struct i2c_algorithm tegra_i2c_algo = {
@@ -1853,17 +1571,12 @@ static const struct tegra_i2c_hw_feature tegra20_i2c_hw = {
 	.clk_divisor_std_mode = 0,
 	.clk_divisor_fast_mode = 0,
 	.clk_divisor_fast_plus_mode = 0,
-	.clk_multiplier_hs_mode = 12,
 	.has_config_load_reg = false,
 	.has_multi_master_mode = false,
 	.has_slcg_override_reg = false,
-	.has_sw_reset_reg = false,
 	.has_mst_fifo = false,
 	.quirks = &tegra_i2c_quirks,
 	.supports_bus_clear = false,
-	.has_reg_write_buffering = true,
-	.has_slcg_support = false,
-	.has_hs_mode_support = false,
 	.has_apb_dma = true,
 	.tlow_std_mode = 0x4,
 	.thigh_std_mode = 0x2,
@@ -1873,7 +1586,6 @@ static const struct tegra_i2c_hw_feature tegra20_i2c_hw = {
 	.setup_hold_time_fast_fast_plus_mode = 0x0,
 	.setup_hold_time_hs_mode = 0x0,
 	.has_interface_timing_reg = false,
-	.has_gpc_dma = false,
 };
 
 static const struct tegra_i2c_hw_feature tegra30_i2c_hw = {
@@ -1883,17 +1595,12 @@ static const struct tegra_i2c_hw_feature tegra30_i2c_hw = {
 	.clk_divisor_std_mode = 0,
 	.clk_divisor_fast_mode = 0,
 	.clk_divisor_fast_plus_mode = 0,
-	.clk_multiplier_hs_mode = 12,
 	.has_config_load_reg = false,
 	.has_multi_master_mode = false,
 	.has_slcg_override_reg = false,
-	.has_sw_reset_reg = false,
 	.has_mst_fifo = false,
 	.quirks = &tegra_i2c_quirks,
 	.supports_bus_clear = false,
-	.has_reg_write_buffering = true,
-	.has_slcg_support = false,
-	.has_hs_mode_support = false,
 	.has_apb_dma = true,
 	.tlow_std_mode = 0x4,
 	.thigh_std_mode = 0x2,
@@ -1903,7 +1610,6 @@ static const struct tegra_i2c_hw_feature tegra30_i2c_hw = {
 	.setup_hold_time_fast_fast_plus_mode = 0x0,
 	.setup_hold_time_hs_mode = 0x0,
 	.has_interface_timing_reg = false,
-	.has_gpc_dma = false,
 };
 
 static const struct tegra_i2c_hw_feature tegra114_i2c_hw = {
@@ -1913,17 +1619,12 @@ static const struct tegra_i2c_hw_feature tegra114_i2c_hw = {
 	.clk_divisor_std_mode = 0x19,
 	.clk_divisor_fast_mode = 0x19,
 	.clk_divisor_fast_plus_mode = 0x10,
-	.clk_multiplier_hs_mode = 3,
 	.has_config_load_reg = false,
 	.has_multi_master_mode = false,
 	.has_slcg_override_reg = false,
-	.has_sw_reset_reg = false,
 	.has_mst_fifo = false,
 	.quirks = &tegra_i2c_quirks,
 	.supports_bus_clear = true,
-	.has_reg_write_buffering = true,
-	.has_slcg_support = false,
-	.has_hs_mode_support = false,
 	.has_apb_dma = true,
 	.tlow_std_mode = 0x4,
 	.thigh_std_mode = 0x2,
@@ -1933,27 +1634,21 @@ static const struct tegra_i2c_hw_feature tegra114_i2c_hw = {
 	.setup_hold_time_fast_fast_plus_mode = 0x0,
 	.setup_hold_time_hs_mode = 0x0,
 	.has_interface_timing_reg = false,
-	.has_gpc_dma = false,
 };
 
 static const struct tegra_i2c_hw_feature tegra124_i2c_hw = {
 	.has_continue_xfer_support = true,
 	.has_per_pkt_xfer_complete_irq = true,
-	.clk_divisor_hs_mode = 2,
+	.clk_divisor_hs_mode = 1,
 	.clk_divisor_std_mode = 0x19,
 	.clk_divisor_fast_mode = 0x19,
 	.clk_divisor_fast_plus_mode = 0x10,
-	.clk_multiplier_hs_mode = 13,
 	.has_config_load_reg = true,
 	.has_multi_master_mode = false,
 	.has_slcg_override_reg = true,
-	.has_sw_reset_reg = false,
 	.has_mst_fifo = false,
 	.quirks = &tegra_i2c_quirks,
 	.supports_bus_clear = true,
-	.has_reg_write_buffering = true,
-	.has_slcg_support = false,
-	.has_hs_mode_support = false,
 	.has_apb_dma = true,
 	.tlow_std_mode = 0x4,
 	.thigh_std_mode = 0x2,
@@ -1963,27 +1658,21 @@ static const struct tegra_i2c_hw_feature tegra124_i2c_hw = {
 	.setup_hold_time_fast_fast_plus_mode = 0x0,
 	.setup_hold_time_hs_mode = 0x0,
 	.has_interface_timing_reg = true,
-	.has_gpc_dma = false,
 };
 
 static const struct tegra_i2c_hw_feature tegra210_i2c_hw = {
 	.has_continue_xfer_support = true,
 	.has_per_pkt_xfer_complete_irq = true,
-	.clk_divisor_hs_mode = 2,
+	.clk_divisor_hs_mode = 1,
 	.clk_divisor_std_mode = 0x19,
 	.clk_divisor_fast_mode = 0x19,
 	.clk_divisor_fast_plus_mode = 0x10,
-	.clk_multiplier_hs_mode = 13,
 	.has_config_load_reg = true,
 	.has_multi_master_mode = false,
 	.has_slcg_override_reg = true,
-	.has_sw_reset_reg = false,
 	.has_mst_fifo = false,
 	.quirks = &tegra_i2c_quirks,
 	.supports_bus_clear = true,
-	.has_reg_write_buffering = true,
-	.has_slcg_support = false,
-	.has_hs_mode_support = false,
 	.has_apb_dma = true,
 	.tlow_std_mode = 0x4,
 	.thigh_std_mode = 0x2,
@@ -1993,28 +1682,21 @@ static const struct tegra_i2c_hw_feature tegra210_i2c_hw = {
 	.setup_hold_time_fast_fast_plus_mode = 0,
 	.setup_hold_time_hs_mode = 0,
 	.has_interface_timing_reg = true,
-	.interface_timing_enhancement = false,
-	.has_gpc_dma = true,
 };
 
 static const struct tegra_i2c_hw_feature tegra186_i2c_hw = {
 	.has_continue_xfer_support = true,
 	.has_per_pkt_xfer_complete_irq = true,
-	.clk_divisor_hs_mode = 2,
+	.clk_divisor_hs_mode = 1,
 	.clk_divisor_std_mode = 0x16,
 	.clk_divisor_fast_mode = 0x19,
 	.clk_divisor_fast_plus_mode = 0x10,
-	.clk_multiplier_hs_mode = 13,
 	.has_config_load_reg = true,
 	.has_multi_master_mode = false,
 	.has_slcg_override_reg = true,
-	.has_sw_reset_reg = true,
 	.has_mst_fifo = false,
 	.quirks = &tegra_i2c_quirks,
 	.supports_bus_clear = true,
-	.has_reg_write_buffering = false,
-	.has_slcg_support = true,
-	.has_hs_mode_support = false,
 	.has_apb_dma = false,
 	.tlow_std_mode = 0x4,
 	.thigh_std_mode = 0x3,
@@ -2024,78 +1706,33 @@ static const struct tegra_i2c_hw_feature tegra186_i2c_hw = {
 	.setup_hold_time_fast_fast_plus_mode = 0,
 	.setup_hold_time_hs_mode = 0,
 	.has_interface_timing_reg = true,
-	.interface_timing_enhancement = false,
-	.has_gpc_dma = true,
 };
 
 static const struct tegra_i2c_hw_feature tegra194_i2c_hw = {
 	.has_continue_xfer_support = true,
 	.has_per_pkt_xfer_complete_irq = true,
-	.clk_divisor_hs_mode = 2,
+	.clk_divisor_hs_mode = 1,
 	.clk_divisor_std_mode = 0x4f,
 	.clk_divisor_fast_mode = 0x3c,
 	.clk_divisor_fast_plus_mode = 0x16,
-	.clk_multiplier_hs_mode = 13,
 	.has_config_load_reg = true,
 	.has_multi_master_mode = true,
 	.has_slcg_override_reg = true,
-	.has_sw_reset_reg = true,
 	.has_mst_fifo = true,
 	.quirks = &tegra194_i2c_quirks,
 	.supports_bus_clear = true,
-	.has_reg_write_buffering = false,
-	.has_slcg_support = true,
-	.has_hs_mode_support = true,
 	.has_apb_dma = false,
 	.tlow_std_mode = 0x8,
 	.thigh_std_mode = 0x7,
 	.tlow_fast_fastplus_mode = 0x2,
 	.thigh_fast_fastplus_mode = 0x2,
-	.tlow_hs_mode = 0x8,
-	.thigh_hs_mode = 0x3,
 	.setup_hold_time_std_mode = 0x08080808,
 	.setup_hold_time_fast_fast_plus_mode = 0x02020202,
 	.setup_hold_time_hs_mode = 0x090909,
 	.has_interface_timing_reg = true,
-	.interface_timing_enhancement = true,
-	.has_gpc_dma = true,
-};
-
-static const struct tegra_i2c_hw_feature tegra234_i2c_hw = {
-	.has_continue_xfer_support = true,
-	.has_per_pkt_xfer_complete_irq = true,
-	.clk_divisor_hs_mode = 0x2,
-	.clk_divisor_std_mode = 0x4f,
-	.clk_divisor_fast_mode = 0x58,
-	.clk_divisor_fast_plus_mode = 0x24,
-	.clk_multiplier_hs_mode = 13,
-	.has_config_load_reg = true,
-	.has_multi_master_mode = true,
-	.has_slcg_override_reg = true,
-	.has_sw_reset_reg = true,
-	.has_mst_fifo = true,
-	.quirks = &tegra194_i2c_quirks,
-	.supports_bus_clear = true,
-	.has_reg_write_buffering = false,
-	.has_slcg_support = true,
-	.has_hs_mode_support = true,
-	.has_apb_dma = false,
-	.tlow_std_mode = 0x8,
-	.thigh_std_mode = 0x7,
-	.tlow_fast_fastplus_mode = 0x1,
-	.thigh_fast_fastplus_mode = 0x1,
-	.tlow_hs_mode = 0x8,
-	.thigh_hs_mode = 0x3,
-	.setup_hold_time_std_mode = 0x08080808,
-	.setup_hold_time_fast_fast_plus_mode = 0x02020202,
-	.setup_hold_time_hs_mode = 0x090909,
-	.has_interface_timing_reg = true,
-	.interface_timing_enhancement = true,
-	.has_gpc_dma = true,
 };
 
 static const struct of_device_id tegra_i2c_of_match[] = {
-	{ .compatible = "nvidia,tegra234-i2c", .data = &tegra234_i2c_hw, },
 	{ .compatible = "nvidia,tegra194-i2c", .data = &tegra194_i2c_hw, },
 	{ .compatible = "nvidia,tegra186-i2c", .data = &tegra186_i2c_hw, },
 	{ .compatible = "nvidia,tegra210-i2c-vi", .data = &tegra210_i2c_hw, },
@@ -2123,11 +1760,6 @@ static void tegra_i2c_parse_dt(struct tegra_i2c_dev *i2c_dev)
 
 	multi_mode = of_property_read_bool(np, "multi-master");
 	i2c_dev->multimaster_mode = multi_mode;
-	if (i2c_dev->multimaster_mode &&
-			!i2c_dev->hw->has_multi_master_mode) {
-		dev_info(i2c_dev->dev, "multi-master mode not supported\n");
-		i2c_dev->multimaster_mode = false;
-	}
 
 	if (of_device_is_compatible(np, "nvidia,tegra20-i2c-dvc"))
 		i2c_dev->is_dvc = true;
@@ -2135,18 +1767,8 @@ static void tegra_i2c_parse_dt(struct tegra_i2c_dev *i2c_dev)
 	if (of_device_is_compatible(np, "nvidia,tegra210-i2c-vi"))
 		i2c_dev->is_vi = true;
 
-	err = of_property_read_u32(np, "nvidia,hs-master-code", &prop);
-	if (!err)
-		i2c_dev->hs_master_code = prop;
-
 	err = of_property_read_u32(np, "nvidia,epl-reporter-id", &prop);
 	i2c_dev->epl_reporter_id = (err) ? 0 : prop;
-
-	i2c_dev->disable_dma_mode = !of_property_read_bool(np, "dmas");
-	i2c_dev->is_clkon_always = of_property_read_bool(np,
-			"nvidia,clock-always-on");
-	i2c_dev->reinit_ctrl_before_xfer = of_property_read_bool(np,
-			"nvidia,reinit-ctrl-before-xfer");
 }
 
 static int tegra_i2c_init_clocks(struct tegra_i2c_dev *i2c_dev)
@@ -2172,15 +1794,13 @@ static int tegra_i2c_init_clocks(struct tegra_i2c_dev *i2c_dev)
 
 	i2c_dev->div_clk = i2c_dev->clocks[0].clk;
 
-	if (i2c_dev->multimaster_mode || i2c_dev->hw->has_slcg_support)
-		i2c_dev->is_clkon_always = true;
+	if (!i2c_dev->multimaster_mode)
+		return 0;
 
-	if (i2c_dev->is_clkon_always) {
-		err = clk_enable(i2c_dev->div_clk);
-		if (err) {
-			dev_err(i2c_dev->dev, "failed to enable div-clk: %d\n", err);
-			goto unprepare_clocks;
-		}
+	err = clk_enable(i2c_dev->div_clk);
+	if (err) {
+		dev_err(i2c_dev->dev, "failed to enable div-clk: %d\n", err);
+		goto unprepare_clocks;
 	}
 
 	return 0;
@@ -2193,7 +1813,7 @@ unprepare_clocks:
 
 static void tegra_i2c_release_clocks(struct tegra_i2c_dev *i2c_dev)
 {
-	if (i2c_dev->is_clkon_always)
+	if (i2c_dev->multimaster_mode)
 		clk_disable(i2c_dev->div_clk);
 
 	clk_bulk_unprepare(i2c_dev->nclocks, i2c_dev->clocks);
@@ -2214,6 +1834,37 @@ static int tegra_i2c_init_hardware(struct tegra_i2c_dev *i2c_dev)
 	return ret;
 }
 
+/* Error report injection test support is included */
+static int i2c_inject_err_fsi(unsigned int inst_id, struct epl_error_report_frame err_rpt_frame,
+				void *data)
+{
+	int err = -EFAULT;
+	struct tegra_i2c_dev *i2c_dev = (struct tegra_i2c_dev *)data;
+
+	/* Sanity check inst_id */
+	if (inst_id != i2c_dev->adapter.nr) {
+		dev_err(i2c_dev->dev, "Invalid Input -> Instance ID = 0x%04x\n", inst_id);
+		return -EINVAL;
+	}
+
+	/* Sanity check reporter_id */
+	if (err_rpt_frame.reporter_id != i2c_dev->epl_reporter_id) {
+		dev_err(i2c_dev->dev, "Invalid Input -> Reporter ID = 0x%04x\n",
+						err_rpt_frame.reporter_id);
+		return -EINVAL;
+	}
+
+	/* Report error to FSI */
+	err = epl_report_error(err_rpt_frame);
+	if (err != 0) {
+		dev_err(i2c_dev->dev, "Error injection failed for err_id: %u",
+						err_rpt_frame.error_code);
+		return -EFAULT;
+	}
+
+	return err;
+}
+
 static int tegra_i2c_probe(struct platform_device *pdev)
 {
 	struct tegra_i2c_dev *i2c_dev;
@@ -2230,17 +1881,12 @@ static int tegra_i2c_probe(struct platform_device *pdev)
 	init_completion(&i2c_dev->dma_complete);
 
 	i2c_dev->hw = of_device_get_match_data(&pdev->dev);
+	i2c_dev->cont_id = pdev->id;
 	i2c_dev->dev = &pdev->dev;
 
 	i2c_dev->base = devm_platform_get_and_ioremap_resource(pdev, 0, &res);
 	if (IS_ERR(i2c_dev->base))
 		return PTR_ERR(i2c_dev->base);
-
-	if ((i2c_dev->bus_clk_rate == I2C_HS_MODE) &&
-			!i2c_dev->hw->has_hs_mode_support) {
-		dev_info(i2c_dev->dev, "HS mode not supported\n");
-		i2c_dev->bus_clk_rate = 100000; /* default clock rate */
-	}
 
 	i2c_dev->base_phys = res->start;
 
@@ -2248,21 +1894,23 @@ static int tegra_i2c_probe(struct platform_device *pdev)
 	if (err < 0)
 		return err;
 
-	i2c_dev->prod_list = devm_tegra_prod_get(&pdev->dev);
-	if (IS_ERR_OR_NULL(i2c_dev->prod_list)) {
-		dev_dbg(&pdev->dev, "Prod-setting not available\n");
-		i2c_dev->prod_list = NULL;
-	}
 	i2c_dev->irq = err;
 
 	/* interrupt will be enabled during of transfer time */
 	irq_set_status_flags(i2c_dev->irq, IRQ_NOAUTOEN);
 
-	err = devm_request_irq(i2c_dev->dev, i2c_dev->irq, tegra_i2c_isr,
-			       IRQF_NO_SUSPEND, dev_name(i2c_dev->dev),
-			       i2c_dev);
+	err = devm_request_threaded_irq(i2c_dev->dev, i2c_dev->irq,
+					NULL, tegra_i2c_isr,
+					IRQF_NO_SUSPEND | IRQF_ONESHOT,
+					dev_name(i2c_dev->dev), i2c_dev);
 	if (err)
 		return err;
+
+	i2c_dev->prod_list = devm_tegra_prod_get(&pdev->dev);
+	if (IS_ERR_OR_NULL(i2c_dev->prod_list)) {
+		dev_dbg(&pdev->dev, "Prod-setting not available\n");
+		i2c_dev->prod_list = NULL;
+	}
 
 	i2c_dev->rst = devm_reset_control_get_exclusive(i2c_dev->dev, "i2c");
 	if (IS_ERR(i2c_dev->rst)) {
@@ -2277,11 +1925,9 @@ static int tegra_i2c_probe(struct platform_device *pdev)
 	if (err)
 		return err;
 
-	if (!i2c_dev->disable_dma_mode) {
-		err = tegra_i2c_init_dma(i2c_dev);
-		if (err)
-			goto release_clocks;
-	}
+	err = tegra_i2c_init_dma(i2c_dev);
+	if (err)
+		goto release_clocks;
 
 	/*
 	 * VI I2C is in VE power domain which is not always ON and not
@@ -2311,10 +1957,6 @@ static int tegra_i2c_probe(struct platform_device *pdev)
 	i2c_dev->adapter.class = I2C_CLASS_DEPRECATED;
 	i2c_dev->adapter.algo = &tegra_i2c_algo;
 	i2c_dev->adapter.nr = pdev->id;
-	i2c_dev->adapter.bus_clk_rate = i2c_dev->bus_clk_rate;
-	i2c_dev->adapter.i2c_bus_status = tegra_i2c_bus_status;
-
-	i2c_dev->cont_id = i2c_dev->adapter.nr & PACKET_HEADER0_CONT_ID_MASK;
 
 	if (i2c_dev->hw->supports_bus_clear)
 		i2c_dev->adapter.bus_recovery_info = &tegra_i2c_recovery_info;
@@ -2325,6 +1967,16 @@ static int tegra_i2c_probe(struct platform_device *pdev)
 	err = i2c_add_numbered_adapter(&i2c_dev->adapter);
 	if (err)
 		goto release_rpm;
+
+	/* Register error reporting callback */
+	err = hsierrrpt_reg_cb(IP_I2C, i2c_dev->adapter.nr, i2c_inject_err_fsi, i2c_dev);
+
+	if (err != 0)
+		dev_info(i2c_dev->dev, "Err inj callback registration failed: %d", err);
+	/* Continue init despite err inj utility
+	 * registration failure, as the err inj support
+	 * is meant only for debug purposes.
+	 */
 
 	return 0;
 
@@ -2341,6 +1993,17 @@ release_clocks:
 static int tegra_i2c_remove(struct platform_device *pdev)
 {
 	struct tegra_i2c_dev *i2c_dev = platform_get_drvdata(pdev);
+	int err;
+
+	err = hsierrrpt_dereg_cb(IP_I2C, i2c_dev->adapter.nr);
+
+	if (err != 0)
+		dev_info(i2c_dev->dev, "Err inj callback de-registration failed: %d", err);
+
+	/* Continue remove despite err inj utility
+	 * de-registration failure, as the err inj support
+	 * is meant only for debug purposes.
+	 */
 
 	i2c_del_adapter(&i2c_dev->adapter);
 	pm_runtime_disable(i2c_dev->dev);
@@ -2397,13 +2060,7 @@ static int __maybe_unused tegra_i2c_suspend(struct device *dev)
 	struct tegra_i2c_dev *i2c_dev = dev_get_drvdata(dev);
 	int err;
 
-	err = clk_enable(i2c_dev->div_clk);
-	if (err < 0) {
-		dev_err(i2c_dev->dev, "suspend: clock enable failed %d\n", err);
-		return err;
-	}
-	reset_control_reset(i2c_dev->rst);
-	clk_disable(i2c_dev->div_clk);
+	i2c_mark_adapter_suspended(&i2c_dev->adapter);
 
 	if (!pm_runtime_status_suspended(dev)) {
 		err = tegra_i2c_runtime_suspend(dev);
@@ -2442,16 +2099,8 @@ static int __maybe_unused tegra_i2c_resume(struct device *dev)
 			return err;
 	}
 
-	if (i2c_dev->is_clkon_always) {
-		err = clk_enable(i2c_dev->div_clk);
-		if (err < 0) {
-			dev_err(i2c_dev->dev, "clock enable failed %d\n",
-				err);
-			return err;
-		}
-	}
-
 	i2c_mark_adapter_resumed(&i2c_dev->adapter);
+
 	return 0;
 }
 

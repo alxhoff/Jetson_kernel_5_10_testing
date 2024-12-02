@@ -201,6 +201,11 @@ __check_struct_size(size_t base, size_t arr, size_t count, size_t *size)
 	__T;								\
 })
 
+static __always_inline ptrdiff_t ptrdiff(const void *a, const void *b)
+{
+	return a - b;
+}
+
 /*
  * container_of_user: Extract the superclass from a pointer to a member.
  *
@@ -338,7 +343,7 @@ wait_remaining_ms_from_jiffies(unsigned long timestamp_jiffies, int to_wait_ms)
 #define wait_for(COND, MS)		_wait_for((COND), (MS) * 1000, 10, 1000)
 
 /* If CONFIG_PREEMPT_COUNT is disabled, in_atomic() always reports false. */
-#if defined(CONFIG_DRM_I915_DEBUG) && defined(CONFIG_PREEMPT_COUNT)
+#if defined(CONFIG_DRM_I915_DEBUG) && defined(CONFIG_PREEMPT_COUNT) && !defined(CONFIG_PREEMPT_RT)
 # define _WAIT_FOR_ATOMIC_CHECK(ATOMIC) WARN_ON_ONCE((ATOMIC) && !in_atomic())
 #else
 # define _WAIT_FOR_ATOMIC_CHECK(ATOMIC) do { } while (0)
@@ -418,6 +423,11 @@ static inline const char *onoff(bool v)
 	return v ? "on" : "off";
 }
 
+static inline const char *enabledisable(bool v)
+{
+	return v ? "enable" : "disable";
+}
+
 static inline const char *enableddisabled(bool v)
 {
 	return v ? "enabled" : "disabled";
@@ -438,9 +448,14 @@ static inline void __add_taint_for_CI(unsigned int taint)
 void cancel_timer(struct timer_list *t);
 void set_timer_ms(struct timer_list *t, unsigned long timeout);
 
+static inline bool timer_active(const struct timer_list *t)
+{
+	return READ_ONCE(t->expires);
+}
+
 static inline bool timer_expired(const struct timer_list *t)
 {
-	return READ_ONCE(t->expires) && !timer_pending(t);
+	return timer_active(t) && !timer_pending(t);
 }
 
 /*

@@ -125,7 +125,6 @@ struct lirc_fh {
  * @last_protocol: protocol of last keypress
  * @last_scancode: scancode of last keypress
  * @last_toggle: toggle value of last command
- * @min_delay: optional minimum delay to send IR event reset for raw IR decoding
  * @timeout: optional time after which device stops sending data
  * @min_timeout: minimum timeout supported by device
  * @max_timeout: maximum timeout supported by device
@@ -152,7 +151,7 @@ struct lirc_fh {
  * @tx_ir: transmit IR
  * @s_idle: enable/disable hardware idle mode, upon which,
  *	device doesn't interrupt host until it sees IR pulses
- * @s_learning_mode: enable wide band receiver used for learning
+ * @s_wideband_receiver: enable wide band receiver used for learning
  * @s_carrier_report: enable carrier reports
  * @s_filter: set the scancode filter
  * @s_wakeup_filter: set the wakeup scancode filter. If the mask is zero
@@ -195,7 +194,6 @@ struct rc_dev {
 	enum rc_proto			last_protocol;
 	u64				last_scancode;
 	u8				last_toggle;
-	u32				min_delay;
 	u32				timeout;
 	u32				min_timeout;
 	u32				max_timeout;
@@ -220,7 +218,7 @@ struct rc_dev {
 	int				(*s_rx_carrier_range)(struct rc_dev *dev, u32 min, u32 max);
 	int				(*tx_ir)(struct rc_dev *dev, unsigned *txbuf, unsigned n);
 	void				(*s_idle)(struct rc_dev *dev, bool enable);
-	int				(*s_learning_mode)(struct rc_dev *dev, int enable);
+	int				(*s_wideband_receiver)(struct rc_dev *dev, int enable);
 	int				(*s_carrier_report) (struct rc_dev *dev, int enable);
 	int				(*s_filter)(struct rc_dev *dev,
 						    struct rc_scancode_filter *filter);
@@ -315,6 +313,7 @@ struct ir_raw_event {
 #define MS_TO_US(msec)		((msec) * 1000)
 #define IR_MAX_DURATION		MS_TO_US(500)
 #define IR_DEFAULT_TIMEOUT	MS_TO_US(125)
+#define IR_MAX_TIMEOUT		LIRC_VALUE_MASK
 
 void ir_raw_event_handle(struct rc_dev *dev);
 int ir_raw_event_store(struct rc_dev *dev, struct ir_raw_event *ev);

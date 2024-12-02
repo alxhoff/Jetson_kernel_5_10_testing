@@ -1,7 +1,6 @@
 // SPDX-License-Identifier: ISC
 /*
  * Copyright (c) 2014 Broadcom Corporation
- * Copyright (c) 2021, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  */
 
 #include <linux/kernel.h>
@@ -62,6 +61,13 @@ BRCMF_FW_DEF(4366C, "brcmfmac4366c-pcie");
 BRCMF_FW_DEF(4371, "brcmfmac4371-pcie");
 CY_FW_DEF(4355, "cyfmac54591-pcie");
 
+/* firmware config files */
+MODULE_FIRMWARE(BRCMF_FW_DEFAULT_PATH "brcmfmac*-pcie.txt");
+MODULE_FIRMWARE(BRCMF_FW_DEFAULT_PATH "brcmfmac*-pcie.*.txt");
+
+/* per-board firmware binaries */
+MODULE_FIRMWARE(BRCMF_FW_DEFAULT_PATH "brcmfmac*-pcie.*.bin");
+
 static const struct brcmf_firmware_mapping brcmf_pcie_fwnames[] = {
 	BRCMF_FW_ENTRY(BRCM_CC_43602_CHIP_ID, 0xFFFFFFFF, 43602),
 	BRCMF_FW_ENTRY(BRCM_CC_43465_CHIP_ID, 0xFFFFFFF0, 4366C),
@@ -80,6 +86,7 @@ static const struct brcmf_firmware_mapping brcmf_pcie_fwnames[] = {
 	BRCMF_FW_ENTRY(BRCM_CC_4366_CHIP_ID, 0x0000000F, 4366B),
 	BRCMF_FW_ENTRY(BRCM_CC_4366_CHIP_ID, 0xFFFFFFF0, 4366C),
 	BRCMF_FW_ENTRY(BRCM_CC_43664_CHIP_ID, 0xFFFFFFF0, 4366C),
+	BRCMF_FW_ENTRY(BRCM_CC_43666_CHIP_ID, 0xFFFFFFF0, 4366C),
 	BRCMF_FW_ENTRY(BRCM_CC_4371_CHIP_ID, 0xFFFFFFFF, 4371),
 	BRCMF_FW_ENTRY(CY_CC_89459_CHIP_ID, 0xFFFFFFFF, 4355),
 };
@@ -629,7 +636,7 @@ static int brcmf_pcie_exit_download_state(struct brcmf_pciedev_info *devinfo,
 	}
 
 	if (!brcmf_chip_set_active(devinfo->ci, resetintr))
-		return -EINVAL;
+		return -EIO;
 	return 0;
 }
 
@@ -747,6 +754,7 @@ static void brcmf_pcie_bus_console_init(struct brcmf_pciedev_info *devinfo)
 /**
  * brcmf_pcie_bus_console_read - reads firmware messages
  *
+ * @devinfo: pointer to the device data structure
  * @error: specifies if error has occurred (prints messages unconditionally)
  */
 static void brcmf_pcie_bus_console_read(struct brcmf_pciedev_info *devinfo,
@@ -1143,6 +1151,10 @@ static int brcmf_pcie_init_ringbuffers(struct brcmf_pciedev_info *devinfo)
 				BRCMF_NROF_H2D_COMMON_MSGRINGS;
 		max_completionrings = BRCMF_NROF_D2H_COMMON_MSGRINGS;
 	}
+	if (max_flowrings > 512) {
+		brcmf_err(bus, "invalid max_flowrings(%d)\n", max_flowrings);
+		return -EIO;
+	}
 
 	if (devinfo->dma_idx_sz != 0) {
 		bufsz = (max_submissionrings + max_completionrings) *
@@ -1409,6 +1421,8 @@ static
 int brcmf_pcie_get_fwname(struct device *dev, const char *ext, u8 *fw_name)
 {
 	struct brcmf_bus *bus_if = dev_get_drvdata(dev);
+	struct brcmf_pciedev *buspub = bus_if->bus_priv.pcie;
+	struct brcmf_pciedev_info *devinfo = buspub->devinfo;
 	struct brcmf_fw_request *fwreq;
 	struct brcmf_fw_name fwnames[] = {
 		{ ext, fw_name },
@@ -1416,6 +1430,7 @@ int brcmf_pcie_get_fwname(struct device *dev, const char *ext, u8 *fw_name)
 	u32 chip;
 
 	chip = bus_if->chip;
+
 	fwreq = brcmf_fw_alloc_request(chip, bus_if->chiprev,
 				       brcmf_pcie_fwnames,
 				       ARRAY_SIZE(brcmf_pcie_fwnames),
@@ -1915,7 +1930,8 @@ brcmf_pcie_probe(struct pci_dev *pdev, const struct pci_device_id *id)
 
 	devinfo->pdev = pdev;
 	pcie_bus_dev = NULL;
-	devinfo->ci = brcmf_chip_attach(devinfo, &brcmf_pcie_buscore_ops);
+	devinfo->ci = brcmf_chip_attach(devinfo, pdev->device,
+					&brcmf_pcie_buscore_ops);
 	if (IS_ERR(devinfo->ci)) {
 		ret = PTR_ERR(devinfo->ci);
 		devinfo->ci = NULL;
@@ -1994,27 +2010,6 @@ fail:
 	return ret;
 }
 
-
-static void
-brcmf_pcie_shutdown(struct pci_dev *pdev)
-{
-	struct brcmf_pciedev_info *devinfo;
-	struct brcmf_bus *bus;
-	u32 status;
-
-	brcmf_dbg(PCIE, "Enter\n");
-
-	bus = dev_get_drvdata(&pdev->dev);
-	if (bus == NULL)
-		return;
-
-	devinfo = bus->bus_priv.pcie->devinfo;
-
-	brcmf_pcie_intr_disable(devinfo);
-
-	status = brcmf_pcie_read_reg32(devinfo, BRCMF_PCIE_PCIE2REG_MAILBOXINT);
-	brcmf_pcie_write_reg32(devinfo, BRCMF_PCIE_PCIE2REG_MAILBOXINT, status);
-}
 
 static void
 brcmf_pcie_remove(struct pci_dev *pdev)
@@ -2195,7 +2190,6 @@ static struct pci_driver brcmf_pciedrvr = {
 	.id_table = brcmf_pcie_devid_table,
 	.probe = brcmf_pcie_probe,
 	.remove = brcmf_pcie_remove,
-	.shutdown = brcmf_pcie_shutdown,
 #ifdef CONFIG_PM
 	.driver.pm = &brcmf_pciedrvr_pm,
 #endif

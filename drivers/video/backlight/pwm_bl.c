@@ -1,7 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0-only
 /*
- * Copyright (c) 2013-2021, NVIDIA CORPORATION, All rights reserved.
- *
  * Simple PWM based backlight control, board code has to setup
  * 1) pin configuration so PWM waveforms can output
  * 2) platform_data being correctly configured
@@ -16,13 +14,30 @@
 #include <linux/fb.h>
 #include <linux/backlight.h>
 #include <linux/err.h>
-#include <linux/gpio.h>
-#include <linux/of_gpio.h>
 #include <linux/pwm.h>
 #include <linux/pwm_backlight.h>
 #include <linux/regulator/consumer.h>
 #include <linux/slab.h>
-#include "board-panel.h"
+
+struct pwm_bl_data {
+	struct pwm_device	*pwm;
+	struct device		*dev;
+	unsigned int		lth_brightness;
+	unsigned int		*levels;
+	bool			enabled;
+	struct regulator	*power_supply;
+	struct gpio_desc	*enable_gpio;
+	unsigned int		scale;
+	bool			legacy;
+	unsigned int		post_pwm_on_delay;
+	unsigned int		pwm_off_delay;
+	int			(*notify)(struct device *,
+					  int brightness);
+	void			(*notify_after)(struct device *,
+					int brightness);
+	int			(*check_fb)(struct device *, struct fb_info *);
+	void			(*exit)(struct device *);
+};
 
 static void pwm_backlight_power_on(struct pwm_bl_data *pb)
 {
@@ -127,32 +142,6 @@ static const struct backlight_ops pwm_backlight_ops = {
 	.check_fb	= pwm_backlight_check_fb,
 };
 
-static int pwm_backlight_notify(struct device *dev, int brightness)
-{
-	struct backlight_device *bl = dev_get_drvdata(dev);
-	struct backlight_device_brightness_info bl_info;
-
-	bl_info.dev = dev;
-	bl_info.brightness = brightness;
-
-	return backlight_device_notifier_call_chain(bl,
-			BACKLIGHT_DEVICE_PRE_BRIGHTNESS_CHANGE,
-			(void *)&bl_info);
-}
-
-static void pwm_backlight_notify_after(struct device *dev, int brightness)
-{
-	struct backlight_device *bl = dev_get_drvdata(dev);
-	struct backlight_device_brightness_info bl_info;
-
-	bl_info.dev = dev;
-	bl_info.brightness = brightness;
-
-	backlight_device_notifier_call_chain(bl,
-			BACKLIGHT_DEVICE_POST_BRIGHTNESS_CHANGE,
-			(void *)&bl_info);
-}
-
 #ifdef CONFIG_OF
 #define PWM_LUMINANCE_SHIFT	16
 #define PWM_LUMINANCE_SCALE	(1 << PWM_LUMINANCE_SHIFT) /* luminance scale */
@@ -238,42 +227,21 @@ int pwm_backlight_brightness_default(struct device *dev,
 }
 
 static int pwm_backlight_parse_dt(struct device *dev,
-				  struct platform_pwm_backlight_data *data,
-				  const char *blnode_compatible,
-				  struct device_node **target_bl_node)
+				  struct platform_pwm_backlight_data *data)
 {
 	struct device_node *node = dev->of_node;
-	unsigned int num_levels = 0;
-	unsigned int levels_count;
+	unsigned int num_levels;
 	unsigned int num_steps = 0;
-	struct device_node *bl_node = NULL;
-	struct device_node *compat_node = NULL;
 	struct property *prop;
-	const __be32 *p;
-	u32 u;
 	unsigned int *table;
 	int length;
 	u32 value;
-	int ret = 0;
-	int n_bl_measured = 0;
+	int ret;
 
 	if (!node)
 		return -ENODEV;
 
-	/* If there's compat_node which is contained in
-	 * backlight parent node, that means, there are
-	 * multi pwm-bl device nodes and right one is
-	 * chosen, with blnode_compatible */
-	if (blnode_compatible)
-		compat_node = of_find_compatible_node(node, NULL,
-			blnode_compatible);
-
-	if (!blnode_compatible || !compat_node)
-		bl_node = node;
-	else
-		bl_node = compat_node;
-
-	*target_bl_node = bl_node;
+	memset(data, 0, sizeof(*data));
 
 	/*
 	 * These values are optional and set as 0 by default, the out values
@@ -283,72 +251,36 @@ static int pwm_backlight_parse_dt(struct device *dev,
 			     &data->post_pwm_on_delay);
 	of_property_read_u32(node, "pwm-off-delay-ms", &data->pwm_off_delay);
 
-	/* determine the number of brightness levels */
-	prop = of_find_property(bl_node, "brightness-levels", &length);
-	if (!prop) {
-		/* if brightness levels array is not defined,
-		 * parse max brightness and default brightness,
-		 * directly.
-		 */
-		ret = of_property_read_u32(bl_node, "max-brightness",
-					   &value);
-		if (ret < 0) {
-			pr_info("fail to parse max-brightness\n");
-			goto fail_parse_dt;
-		}
+	/*
+	 * Determine the number of brightness levels, if this property is not
+	 * set a default table of brightness levels will be used.
+	 */
+	prop = of_find_property(node, "brightness-levels", &length);
+	if (!prop)
+		return 0;
 
-		data->max_brightness = value;
+	num_levels = length / sizeof(u32);
 
-#if defined(CONFIG_ANDROID) && defined(CONFIG_TEGRA_COMMON)
-		if (get_androidboot_mode_charger())
-			ret = of_property_read_u32(bl_node,
-						   "default-charge-brightness",
-						   &value);
-		else
-#endif
-		ret = of_property_read_u32(bl_node, "default-brightness",
-					   &value);
-		if (ret < 0) {
-			pr_info("fail to parse default-brightness\n");
-			goto fail_parse_dt;
-		}
-
-		data->dft_brightness = value;
-	} else {
-		size_t size = 0;
-		int item_counts;
-		unsigned int i, j, n = 0;
-		item_counts = length / sizeof(u32);
-		if (item_counts > 0)
-			size = sizeof(*data->levels) * item_counts;
+	/* read brightness levels from DT property */
+	if (num_levels > 0) {
+		size_t size = sizeof(*data->levels) * num_levels;
 
 		data->levels = devm_kzalloc(dev, size, GFP_KERNEL);
-		if (!data->levels) {
-			ret = -ENOMEM;
-			goto fail_parse_dt;
-		}
+		if (!data->levels)
+			return -ENOMEM;
 
-		ret = of_property_read_u32_array(bl_node,
-						 "brightness-levels",
+		ret = of_property_read_u32_array(node, "brightness-levels",
 						 data->levels,
-						 item_counts);
-		if (ret < 0) {
-			pr_info("fail to parse brightness-levels\n");
-			goto fail_parse_dt;
-		}
+						 num_levels);
+		if (ret < 0)
+			return ret;
 
-		/*
-		 * default-brightness-level: the default brightness level
-		 * (index into the array defined by the "brightness-levels"
-		 * property)
-		 */
-		ret = of_property_read_u32(bl_node,
-					   "default-brightness-level",
+		ret = of_property_read_u32(node, "default-brightness-level",
 					   &value);
-		if (ret < 0) {
-			pr_info("fail to parse default-brightness-level\n");
-			goto fail_parse_dt;
-		}
+		if (ret < 0)
+			return ret;
+
+		data->dft_brightness = value;
 
 		/*
 		 * This property is optional, if is set enables linear
@@ -364,7 +296,13 @@ static int pwm_backlight_parse_dt(struct device *dev,
 		 * between two points.
 		 */
 		if (num_steps) {
-			if (data->max_brightness < 2) {
+			unsigned int num_input_levels = num_levels;
+			unsigned int i;
+			u32 x1, x2, x, dx;
+			u32 y1, y2;
+			s64 dy;
+
+			if (num_input_levels < 2) {
 				dev_err(dev, "can't interpolate\n");
 				return -EINVAL;
 			}
@@ -374,14 +312,7 @@ static int pwm_backlight_parse_dt(struct device *dev,
 			 * taking in consideration the number of interpolated
 			 * steps between two levels.
 			 */
-			for (i = 0; i < data->max_brightness - 1; i++) {
-				if ((data->levels[i + 1] - data->levels[i]) /
-				   num_steps)
-					num_levels += num_steps;
-				else
-					num_levels++;
-			}
-			num_levels++;
+			num_levels = (num_input_levels - 1) * num_steps + 1;
 			dev_dbg(dev, "new number of brightness levels: %d\n",
 				num_levels);
 
@@ -393,24 +324,25 @@ static int pwm_backlight_parse_dt(struct device *dev,
 			table = devm_kzalloc(dev, size, GFP_KERNEL);
 			if (!table)
 				return -ENOMEM;
+			/*
+			 * Fill the interpolated table[x] = y
+			 * by draw lines between each (x1, y1) to (x2, y2).
+			 */
+			dx = num_steps;
+			for (i = 0; i < num_input_levels - 1; i++) {
+				x1 = i * dx;
+				x2 = x1 + dx;
+				y1 = data->levels[i];
+				y2 = data->levels[i + 1];
+				dy = (s64)y2 - y1;
 
-			/* Fill the interpolated table. */
-			levels_count = 0;
-			for (i = 0; i < data->max_brightness - 1; i++) {
-				value = data->levels[i];
-				n = (data->levels[i + 1] - value) / num_steps;
-				if (n > 0) {
-					for (j = 0; j < num_steps; j++) {
-						table[levels_count] = value;
-						value += n;
-						levels_count++;
-					}
-				} else {
-					table[levels_count] = data->levels[i];
-					levels_count++;
+				for (x = x1; x < x2; x++) {
+					table[x] = y1 +
+						div_s64(dy * (x - x1), dx);
 				}
 			}
-			table[levels_count] = data->levels[i];
+			/* Fill in the last point, since no line starts here. */
+			table[x2] = y2;
 
 			/*
 			 * As we use interpolation lets remove current
@@ -419,50 +351,12 @@ static int pwm_backlight_parse_dt(struct device *dev,
 			 */
 			devm_kfree(dev, data->levels);
 			data->levels = table;
-
-			/*
-			 * Reassign max_brightness value to the new total number
-			 * of brightness levels.
-			 */
-			data->max_brightness = num_levels;
 		}
 
-		data->dft_brightness = data->levels[value];
-		data->max_brightness = data->levels[item_counts - 1];
+		data->max_brightness = num_levels - 1;
 	}
 
-	value = 0;
-	ret = of_property_read_u32(bl_node, "lth-brightness",
-		&value);
-	data->lth_brightness = (unsigned int)value;
-
-	data->pwm_gpio = of_get_named_gpio(bl_node, "pwm-gpio", 0);
-
-	of_property_for_each_u32(bl_node, "bl-measured", prop, p, u)
-		n_bl_measured++;
-	if (n_bl_measured > 0) {
-		data->bl_measured = devm_kzalloc(dev,
-			sizeof(*data->bl_measured) * n_bl_measured, GFP_KERNEL);
-		if (!data->bl_measured) {
-			pr_err("bl_measured memory allocation failed\n");
-			ret = -ENOMEM;
-			goto fail_parse_dt;
-		}
-		n_bl_measured = 0;
-		of_property_for_each_u32(bl_node,
-			"bl-measured", prop, p, u)
-			data->bl_measured[n_bl_measured++] = u;
-	}
-
-	/* label, if specified in DT, will be used as device name */
-	of_property_read_string(node, "label", &data->name);
-
-	of_node_put(compat_node);
 	return 0;
-
-fail_parse_dt:
-	of_node_put(compat_node);
-	return ret;
 }
 
 static const struct of_device_id pwm_backlight_of_match[] = {
@@ -473,9 +367,7 @@ static const struct of_device_id pwm_backlight_of_match[] = {
 MODULE_DEVICE_TABLE(of, pwm_backlight_of_match);
 #else
 static int pwm_backlight_parse_dt(struct device *dev,
-				  struct platform_pwm_backlight_data *data,
-				  const char *blnode_compatible,
-				  struct device_node **target_bl_node)
+				  struct platform_pwm_backlight_data *data)
 {
 	return -ENODEV;
 }
@@ -561,7 +453,6 @@ static int pwm_backlight_initial_power_state(const struct pwm_bl_data *pb)
 static int pwm_backlight_probe(struct platform_device *pdev)
 {
 	struct platform_pwm_backlight_data *data = dev_get_platdata(&pdev->dev);
-	struct device_node *np = pdev->dev.of_node;
 	struct platform_pwm_backlight_data defdata;
 	struct backlight_properties props;
 	struct backlight_device *bl;
@@ -569,43 +460,16 @@ static int pwm_backlight_probe(struct platform_device *pdev)
 	struct pwm_bl_data *pb;
 	struct pwm_state state;
 	unsigned int i;
-	struct device_node *target_bl_node = NULL;
-
 	int ret;
-	const char *blnode_compatible = NULL;
 
-	if (!np && !pdev->dev.platform_data) {
-		dev_err(&pdev->dev, "no platform data for pwm_bl\n");
-		return -ENOENT;
-	}
-
-	if (np) {
-		struct pwm_bl_data_dt_ops *pops;
-		tegra_pwm_bl_ops_register(&pdev->dev);
-		pops = (struct pwm_bl_data_dt_ops *)platform_get_drvdata(pdev);
-		memset(&defdata, 0, sizeof(defdata));
-		if (pops) {
-			defdata.init = pops->init;
-			defdata.notify = pops->notify;
-			defdata.notify_after = pops->notify_after;
-			defdata.check_fb = pops->check_fb;
-			defdata.exit = pops->exit;
-			blnode_compatible = pops->blnode_compatible;
-		} else {
-			defdata.notify = pwm_backlight_notify;
-			defdata.notify_after = pwm_backlight_notify_after;
-		}
-
-		ret = pwm_backlight_parse_dt(&pdev->dev, &defdata,
-			blnode_compatible, &target_bl_node);
+	if (!data) {
+		ret = pwm_backlight_parse_dt(&pdev->dev, &defdata);
 		if (ret < 0) {
-			dev_err(&pdev->dev, "fail to find platform data\n");
+			dev_err(&pdev->dev, "failed to find platform data\n");
 			return ret;
 		}
-		data = &defdata;
 
-		/* initialize dev drv data */
-		platform_set_drvdata(pdev, NULL);
+		data = &defdata;
 	}
 
 	if (data->init) {
@@ -622,11 +486,9 @@ static int pwm_backlight_probe(struct platform_device *pdev)
 
 	pb->notify = data->notify;
 	pb->notify_after = data->notify_after;
-	pb->bl_measured = data->bl_measured;
 	pb->check_fb = data->check_fb;
 	pb->exit = data->exit;
 	pb->dev = &pdev->dev;
-	pb->pwm_gpio = data->pwm_gpio;
 	pb->enabled = false;
 	pb->post_pwm_on_delay = data->post_pwm_on_delay;
 	pb->pwm_off_delay = data->pwm_off_delay;
@@ -645,13 +507,10 @@ static int pwm_backlight_probe(struct platform_device *pdev)
 	}
 
 	pb->pwm = devm_pwm_get(&pdev->dev, NULL);
-	if (IS_ERR(pb->pwm) && PTR_ERR(pb->pwm) != -EPROBE_DEFER) {
-		pb->pwm = of_pwm_get(&pdev->dev, target_bl_node, NULL);
-		if (IS_ERR(pb->pwm) && !node) {
-			dev_err(&pdev->dev, "unable to request PWM, trying legacy API\n");
-			pb->legacy = true;
-			pb->pwm = pwm_request(data->pwm_id, "pwm-backlight");
-		}
+	if (IS_ERR(pb->pwm) && PTR_ERR(pb->pwm) != -EPROBE_DEFER && !node) {
+		dev_err(&pdev->dev, "unable to request PWM, trying legacy API\n");
+		pb->legacy = true;
+		pb->pwm = pwm_request(data->pwm_id, "pwm-backlight");
 	}
 
 	if (IS_ERR(pb->pwm)) {
@@ -667,11 +526,10 @@ static int pwm_backlight_probe(struct platform_device *pdev)
 	pwm_init_state(pb->pwm, &state);
 
 	/*
-	 * The DT case will not set pwm_period_ns. Instead, it stores the
-	 * period, parsed from the DT, in the PWM device. In other words,
-	 * the 2nd argument of pwms property indicates pwm_period in
-	 * nonoseconds. For the non-DT case, set the period from
-	 * platform data.
+	 * The DT case will set the pwm_period_ns field to 0 and store the
+	 * period, parsed from the DT, in the PWM device. For the non-DT case,
+	 * set the period from platform data if it has not already been set
+	 * via the PWM lookup table.
 	 */
 	if (!state.period && (data->pwm_period_ns > 0))
 		state.period = data->pwm_period_ns;
@@ -742,16 +600,8 @@ static int pwm_backlight_probe(struct platform_device *pdev)
 
 	props.type = BACKLIGHT_RAW;
 	props.max_brightness = data->max_brightness;
-
-	if (gpio_is_valid(pb->pwm_gpio)) {
-		ret = gpio_request(pb->pwm_gpio, "disp_bl");
-		if (ret)
-			dev_err(&pdev->dev, "backlight gpio request failed\n");
-	}
-
-	bl = backlight_device_register(data->name ? data->name :
-					dev_name(&pdev->dev), &pdev->dev,
-					pb, &pwm_backlight_ops, &props);
+	bl = backlight_device_register(dev_name(&pdev->dev), &pdev->dev, pb,
+				       &pwm_backlight_ops, &props);
 	if (IS_ERR(bl)) {
 		dev_err(&pdev->dev, "failed to register backlight\n");
 		ret = PTR_ERR(bl);
@@ -762,19 +612,16 @@ static int pwm_backlight_probe(struct platform_device *pdev)
 
 	if (data->dft_brightness > data->max_brightness) {
 		dev_warn(&pdev->dev,
-			 "invalid dft brightness: %u, using max one %u\n",
+			 "invalid default brightness level: %u, using %u\n",
 			 data->dft_brightness, data->max_brightness);
 		data->dft_brightness = data->max_brightness;
 	}
 
-	platform_set_drvdata(pdev, bl);
 	bl->props.brightness = data->dft_brightness;
 	bl->props.power = pwm_backlight_initial_power_state(pb);
 	backlight_update_status(bl);
 
-	if (gpio_is_valid(pb->pwm_gpio))
-		gpio_free(pb->pwm_gpio);
-
+	platform_set_drvdata(pdev, bl);
 	return 0;
 
 err_alloc:

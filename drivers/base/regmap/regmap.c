@@ -243,6 +243,16 @@ static void regmap_format_7_9_write(struct regmap *map,
 	*out = cpu_to_be16((reg << 9) | val);
 }
 
+static void regmap_format_7_17_write(struct regmap *map,
+				    unsigned int reg, unsigned int val)
+{
+	u8 *out = map->work_buf;
+
+	out[2] = val;
+	out[1] = val >> 8;
+	out[0] = (val >> 16) | (reg << 1);
+}
+
 static void regmap_format_10_14_write(struct regmap *map,
 				    unsigned int reg, unsigned int val)
 {
@@ -523,6 +533,23 @@ __releases(&map->spinlock)
 	spin_unlock_irqrestore(&map->spinlock, map->spinlock_flags);
 }
 
+static void regmap_lock_raw_spinlock(void *__map)
+__acquires(&map->raw_spinlock)
+{
+	struct regmap *map = __map;
+	unsigned long flags;
+
+	raw_spin_lock_irqsave(&map->raw_spinlock, flags);
+	map->raw_spinlock_flags = flags;
+}
+
+static void regmap_unlock_raw_spinlock(void *__map)
+__releases(&map->raw_spinlock)
+{
+	struct regmap *map = __map;
+	raw_spin_unlock_irqrestore(&map->raw_spinlock, map->raw_spinlock_flags);
+}
+
 static void dev_get_regmap_release(struct device *dev, void *res)
 {
 	/*
@@ -761,11 +788,19 @@ struct regmap *__regmap_init(struct device *dev,
 	} else {
 		if ((bus && bus->fast_io) ||
 		    config->fast_io) {
-			spin_lock_init(&map->spinlock);
-			map->lock = regmap_lock_spinlock;
-			map->unlock = regmap_unlock_spinlock;
-			lockdep_set_class_and_name(&map->spinlock,
-						   lock_key, lock_name);
+			if (config->use_raw_spinlock) {
+				raw_spin_lock_init(&map->raw_spinlock);
+				map->lock = regmap_lock_raw_spinlock;
+				map->unlock = regmap_unlock_raw_spinlock;
+				lockdep_set_class_and_name(&map->raw_spinlock,
+							   lock_key, lock_name);
+			} else {
+				spin_lock_init(&map->spinlock);
+				map->lock = regmap_lock_spinlock;
+				map->unlock = regmap_unlock_spinlock;
+				lockdep_set_class_and_name(&map->spinlock,
+							   lock_key, lock_name);
+			}
 		} else {
 			mutex_init(&map->mutex);
 			map->lock = regmap_lock_mutex;
@@ -885,6 +920,9 @@ struct regmap *__regmap_init(struct device *dev,
 		switch (config->val_bits) {
 		case 9:
 			map->format.format_write = regmap_format_7_9_write;
+			break;
+		case 17:
+			map->format.format_write = regmap_format_7_17_write;
 			break;
 		default:
 			goto err_hwlock;
@@ -1114,10 +1152,10 @@ skip_format_initialization:
 		/* Make sure, that this register range has no selector
 		   or data window within its boundary */
 		for (j = 0; j < config->num_ranges; j++) {
-			unsigned sel_reg = config->ranges[j].selector_reg;
-			unsigned win_min = config->ranges[j].window_start;
-			unsigned win_max = win_min +
-					   config->ranges[j].window_len - 1;
+			unsigned int sel_reg = config->ranges[j].selector_reg;
+			unsigned int win_min = config->ranges[j].window_start;
+			unsigned int win_max = win_min +
+					       config->ranges[j].window_len - 1;
 
 			/* Allow data window inside its own virtual range */
 			if (j == i)
@@ -1286,7 +1324,7 @@ EXPORT_SYMBOL_GPL(devm_regmap_field_alloc);
  */
 int regmap_field_bulk_alloc(struct regmap *regmap,
 			    struct regmap_field **rm_field,
-			    struct reg_field *reg_field,
+			    const struct reg_field *reg_field,
 			    int num_fields)
 {
 	struct regmap_field *rf;
@@ -1322,7 +1360,7 @@ EXPORT_SYMBOL_GPL(regmap_field_bulk_alloc);
 int devm_regmap_field_bulk_alloc(struct device *dev,
 				 struct regmap *regmap,
 				 struct regmap_field **rm_field,
-				 struct reg_field *reg_field,
+				 const struct reg_field *reg_field,
 				 int num_fields)
 {
 	struct regmap_field *rf;
@@ -1497,6 +1535,8 @@ void regmap_exit(struct regmap *map)
 		mutex_destroy(&map->mutex);
 	kfree_const(map->name);
 	kfree(map->patch);
+	if (map->bus && map->bus->free_on_exit)
+		kfree(map->bus);
 	kfree(map);
 }
 EXPORT_SYMBOL_GPL(regmap_exit);
@@ -1511,7 +1551,7 @@ static int dev_get_regmap_match(struct device *dev, void *res, void *data)
 
 	/* If the user didn't specify a name match any */
 	if (data)
-		return !strcmp((*r)->name, data);
+		return (*r)->name && !strcmp((*r)->name, data);
 	else
 		return 1;
 }
@@ -1643,17 +1683,19 @@ static int _regmap_raw_write_impl(struct regmap *map, unsigned int reg,
 	}
 
 	if (!map->cache_bypass && map->format.parse_val) {
-		unsigned int ival;
+		unsigned int ival, offset;
 		int val_bytes = map->format.val_bytes;
-		for (i = 0; i < val_len / val_bytes; i++) {
-			ival = map->format.parse_val(val + (i * val_bytes));
-			ret = regcache_write(map,
-					     reg + regmap_get_offset(map, i),
-					     ival);
+
+		/* Cache the last written value for noinc writes */
+		i = noinc ? val_len - val_bytes : 0;
+		for (; i < val_len; i += val_bytes) {
+			ival = map->format.parse_val(val + i);
+			offset = noinc ? 0 : regmap_get_offset(map, i / val_bytes);
+			ret = regcache_write(map, reg + offset, ival);
 			if (ret) {
 				dev_err(map->dev,
 					"Error in caching of register: %x ret: %d\n",
-					reg + regmap_get_offset(map, i), ret);
+					reg + offset, ret);
 				return ret;
 			}
 		}
@@ -1925,12 +1967,15 @@ int _regmap_write(struct regmap *map, unsigned int reg,
 		}
 	}
 
-	if (regmap_should_log(map))
-		dev_info(map->dev, "%x <= %x\n", reg, val);
+	ret = map->reg_write(context, reg, val);
+	if (ret == 0) {
+		if (regmap_should_log(map))
+			dev_info(map->dev, "%x <= %x\n", reg, val);
 
-	trace_regmap_reg_write(map, reg, val);
+		trace_regmap_reg_write(map, reg, val);
+	}
 
-	return map->reg_write(context, reg, val);
+	return ret;
 }
 
 /**

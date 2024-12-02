@@ -34,7 +34,7 @@
 
 #define v5	5	/* base version */
 #define v6	6	/* per entry policydb mediation check */
-#define v7	7
+#define v7	7	/* v2 compat networking */
 #define v8	8	/* full network masking */
 
 /*
@@ -304,7 +304,7 @@ static bool unpack_u8(struct aa_ext *e, u8 *data, const char *name)
 		if (!inbounds(e, sizeof(u8)))
 			goto fail;
 		if (data)
-			*data = get_unaligned((u8 *)e->pos);
+			*data = *((u8 *)e->pos);
 		e->pos += sizeof(u8);
 		return true;
 	}
@@ -312,6 +312,19 @@ static bool unpack_u8(struct aa_ext *e, u8 *data, const char *name)
 fail:
 	e->pos = pos;
 	return false;
+}
+
+static bool unpack_u16(struct aa_ext *e, u16 *data, const char *name)
+{
+	if (unpack_nameX(e, AA_U16, name)) {
+		if (!inbounds(e, sizeof(u16)))
+			return 0;
+		if (data)
+			*data = le16_to_cpu(get_unaligned((__le16 *) e->pos));
+		e->pos += sizeof(u16);
+		return 1;
+	}
+	return 0;
 }
 
 static bool unpack_u32(struct aa_ext *e, u32 *data, const char *name)
@@ -676,7 +689,7 @@ static struct aa_profile *unpack_profile(struct aa_ext *e, char **ns_name)
 	struct aa_profile *profile = NULL;
 	const char *tmpname, *tmpns = NULL, *name = NULL;
 	const char *info = "failed to unpack profile";
-	size_t ns_len;
+	size_t size = 0, ns_len;
 	struct rhashtable_params params = { 0 };
 	char *key = NULL;
 	struct aa_data *data;
@@ -696,6 +709,10 @@ static struct aa_profile *unpack_profile(struct aa_ext *e, char **ns_name)
 
 	tmpname = aa_splitn_fqname(name, strlen(name), &tmpns, &ns_len);
 	if (tmpns) {
+		if (!tmpname) {
+			info = "empty profile name";
+			goto fail;
+		}
 		*ns_name = kstrndup(tmpns, ns_len, GFP_KERNEL);
 		if (!*ns_name) {
 			info = "out of memory";
@@ -746,16 +763,18 @@ static struct aa_profile *unpack_profile(struct aa_ext *e, char **ns_name)
 		profile->label.flags |= FLAG_HAT;
 	if (!unpack_u32(e, &tmp, NULL))
 		goto fail;
-	if (tmp == PACKED_MODE_COMPLAIN || (e->version & FORCE_COMPLAIN_FLAG))
+	if (tmp == PACKED_MODE_COMPLAIN || (e->version & FORCE_COMPLAIN_FLAG)) {
 		profile->mode = APPARMOR_COMPLAIN;
-	else if (tmp == PACKED_MODE_ENFORCE)
+	} else if (tmp == PACKED_MODE_ENFORCE) {
 		profile->mode = APPARMOR_ENFORCE;
-	else if (tmp == PACKED_MODE_KILL)
+	} else if (tmp == PACKED_MODE_KILL) {
 		profile->mode = APPARMOR_KILL;
-	else if (tmp == PACKED_MODE_UNCONFINED)
+	} else if (tmp == PACKED_MODE_UNCONFINED) {
 		profile->mode = APPARMOR_UNCONFINED;
-	else
+		profile->label.flags |= FLAG_UNCONFINED;
+	} else {
 		goto fail;
+	}
 	if (!unpack_u32(e, &tmp, NULL))
 		goto fail;
 	if (tmp)
@@ -822,6 +841,43 @@ static struct aa_profile *unpack_profile(struct aa_ext *e, char **ns_name)
 		info = "failed to unpack profile secmark rules";
 		goto fail;
 	}
+
+	size = unpack_array(e, "net_allowed_af");
+	if (size || VERSION_LT(e->version, v8)) {
+		profile->net_compat = kzalloc(sizeof(struct aa_net_compat), GFP_KERNEL);
+		if (!profile->net_compat) {
+			info = "out of memory";
+			goto fail;
+		}
+		for (i = 0; i < size; i++) {
+			/* discard extraneous rules that this kernel will
+			 * never request
+			 */
+			if (i >= AF_MAX) {
+				u16 tmp;
+
+				if (!unpack_u16(e, &tmp, NULL) ||
+				    !unpack_u16(e, &tmp, NULL) ||
+				    !unpack_u16(e, &tmp, NULL))
+					goto fail;
+				continue;
+			}
+			if (!unpack_u16(e, &profile->net_compat->allow[i], NULL))
+				goto fail;
+			if (!unpack_u16(e, &profile->net_compat->audit[i], NULL))
+				goto fail;
+			if (!unpack_u16(e, &profile->net_compat->quiet[i], NULL))
+				goto fail;
+		}
+		if (size && !unpack_nameX(e, AA_ARRAYEND, NULL))
+			goto fail;
+		if (VERSION_LT(e->version, v7)) {
+			/* pre v7 policy always allowed these */
+			profile->net_compat->allow[AF_UNIX] = 0xffff;
+			profile->net_compat->allow[AF_NETLINK] = 0xffff;
+		}
+	}
+
 
 	if (unpack_nameX(e, AA_STRUCT, "policydb")) {
 		/* generic policy dfa - optional and may be NULL */
@@ -907,8 +963,13 @@ static struct aa_profile *unpack_profile(struct aa_ext *e, char **ns_name)
 				goto fail;
 			}
 
-			rhashtable_insert_fast(profile->data, &data->head,
-					       profile->data->p);
+			if (rhashtable_insert_fast(profile->data, &data->head,
+						   profile->data->p)) {
+				kfree_sensitive(data->key);
+				kfree_sensitive(data);
+				info = "failed to insert data to table";
+				goto fail;
+			}
 		}
 
 		if (!unpack_nameX(e, AA_STRUCTEND, NULL)) {
@@ -962,7 +1023,7 @@ static int verify_header(struct aa_ext *e, int required, const char **ns)
 	 * if not specified use previous version
 	 * Mask off everything that is not kernel abi version
 	 */
-	if (VERSION_LT(e->version, v5) || VERSION_GT(e->version, v7)) {
+	if (VERSION_LT(e->version, v5) || VERSION_GT(e->version, v8)) {
 		audit_iface(NULL, NULL, NULL, "unsupported interface version",
 			    e, error);
 		return error;

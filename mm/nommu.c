@@ -210,16 +210,6 @@ long vread(char *buf, char *addr, unsigned long count)
 	return count;
 }
 
-long vwrite(char *buf, char *addr, unsigned long count)
-{
-	/* Don't allow overflow */
-	if ((unsigned long) addr + count < count)
-		count = -(unsigned long) addr;
-
-	memcpy(addr, buf, count);
-	return count;
-}
-
 /*
  *	vmalloc  -  allocate virtually contiguous memory
  *
@@ -233,7 +223,7 @@ long vwrite(char *buf, char *addr, unsigned long count)
  */
 void *vmalloc(unsigned long size)
 {
-       return __vmalloc(size, GFP_KERNEL | __GFP_HIGHMEM);
+	return __vmalloc(size, GFP_KERNEL);
 }
 EXPORT_SYMBOL(vmalloc);
 
@@ -251,7 +241,7 @@ EXPORT_SYMBOL(vmalloc);
  */
 void *vzalloc(unsigned long size)
 {
-	return __vmalloc(size, GFP_KERNEL | __GFP_HIGHMEM | __GFP_ZERO);
+	return __vmalloc(size, GFP_KERNEL | __GFP_ZERO);
 }
 EXPORT_SYMBOL(vzalloc);
 
@@ -533,7 +523,7 @@ static void __put_nommu_region(struct vm_region *region)
 		up_write(&nommu_region_sem);
 
 		if (region->vm_file)
-			fput(region->vm_file);
+			vmr_fput(region);
 
 		/* IO memory and memory shared directly out of the pagecache
 		 * from ramfs/tmpfs mustn't be released here */
@@ -665,7 +655,7 @@ static void delete_vma(struct mm_struct *mm, struct vm_area_struct *vma)
 	if (vma->vm_ops && vma->vm_ops->close)
 		vma->vm_ops->close(vma);
 	if (vma->vm_file)
-		fput(vma->vm_file);
+		vma_fput(vma);
 	put_nommu_region(vma->vm_region);
 	vm_area_free(vma);
 }
@@ -835,9 +825,6 @@ static int validate_mmap_request(struct file *file,
 			if (IS_APPEND(file_inode(file)) &&
 			    (file->f_mode & FMODE_WRITE))
 				return -EACCES;
-
-			if (locks_verify_locked(file))
-				return -EAGAIN;
 
 			if (!(capabilities & NOMMU_MAP_DIRECT))
 				return -ENODEV;
@@ -1188,7 +1175,7 @@ unsigned long do_mmap(struct file *file,
 					goto error_just_free;
 				}
 			}
-			fput(region->vm_file);
+			vmr_fput(region);
 			kmem_cache_free(vm_region_jar, region);
 			region = pregion;
 			result = start;
@@ -1265,10 +1252,10 @@ error_just_free:
 	up_write(&nommu_region_sem);
 error:
 	if (region->vm_file)
-		fput(region->vm_file);
+		vmr_fput(region);
 	kmem_cache_free(vm_region_jar, region);
 	if (vma->vm_file)
-		fput(vma->vm_file);
+		vma_fput(vma);
 	vm_area_free(vma);
 	return ret;
 
@@ -1305,8 +1292,6 @@ unsigned long ksys_mmap_pgoff(unsigned long addr, unsigned long len,
 		if (!file)
 			goto out;
 	}
-
-	flags &= ~(MAP_EXECUTABLE | MAP_DENYWRITE);
 
 	retval = vm_mmap_pgoff(file, addr, len, prot, flags, pgoff);
 
@@ -1511,7 +1496,6 @@ erase_whole_vma:
 	delete_vma(mm, vma);
 	return 0;
 }
-EXPORT_SYMBOL(do_munmap);
 
 int vm_munmap(unsigned long addr, size_t len)
 {
@@ -1668,15 +1652,16 @@ vm_fault_t filemap_fault(struct vm_fault *vmf)
 }
 EXPORT_SYMBOL(filemap_fault);
 
-void filemap_map_pages(struct vm_fault *vmf,
+vm_fault_t filemap_map_pages(struct vm_fault *vmf,
 		pgoff_t start_pgoff, pgoff_t end_pgoff)
 {
 	BUG();
+	return 0;
 }
 EXPORT_SYMBOL(filemap_map_pages);
 
-int __access_remote_vm(struct task_struct *tsk, struct mm_struct *mm,
-		unsigned long addr, void *buf, int len, unsigned int gup_flags)
+int __access_remote_vm(struct mm_struct *mm, unsigned long addr, void *buf,
+		       int len, unsigned int gup_flags)
 {
 	struct vm_area_struct *vma;
 	int write = gup_flags & FOLL_WRITE;
@@ -1722,7 +1707,7 @@ int __access_remote_vm(struct task_struct *tsk, struct mm_struct *mm,
 int access_remote_vm(struct mm_struct *mm, unsigned long addr,
 		void *buf, int len, unsigned int gup_flags)
 {
-	return __access_remote_vm(NULL, mm, addr, buf, len, gup_flags);
+	return __access_remote_vm(mm, addr, buf, len, gup_flags);
 }
 
 /*
@@ -1741,7 +1726,7 @@ int access_process_vm(struct task_struct *tsk, unsigned long addr, void *buf, in
 	if (!mm)
 		return 0;
 
-	len = __access_remote_vm(tsk, mm, addr, buf, len, gup_flags);
+	len = __access_remote_vm(mm, addr, buf, len, gup_flags);
 
 	mmput(mm);
 	return len;

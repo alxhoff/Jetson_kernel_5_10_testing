@@ -7,6 +7,8 @@
  * s390 port, used ppc64 as template. Mike Grundy <grundym@us.ibm.com>
  */
 
+#define pr_fmt(fmt) "kprobes: " fmt
+
 #include <linux/moduleloader.h>
 #include <linux/kprobes.h>
 #include <linux/ptrace.h>
@@ -42,11 +44,6 @@ void *alloc_insn_page(void)
 		return NULL;
 	__set_memory((unsigned long) page, 1, SET_MEMORY_RO | SET_MEMORY_X);
 	return page;
-}
-
-void free_insn_page(void *page)
-{
-	module_memfree(page);
 }
 
 static void *alloc_s390_insn_page(void)
@@ -97,11 +94,6 @@ static void copy_instruction(struct kprobe *p)
 }
 NOKPROBE_SYMBOL(copy_instruction);
 
-static inline int is_kernel_addr(void *addr)
-{
-	return addr < (void *)_end;
-}
-
 static int s390_get_insn_slot(struct kprobe *p)
 {
 	/*
@@ -110,7 +102,7 @@ static int s390_get_insn_slot(struct kprobe *p)
 	 * field can be patched and executed within the insn slot.
 	 */
 	p->ainsn.insn = NULL;
-	if (is_kernel_addr(p->addr))
+	if (is_kernel((unsigned long)p->addr))
 		p->ainsn.insn = get_s390_insn_slot();
 	else if (is_module_addr(p->addr))
 		p->ainsn.insn = get_insn_slot();
@@ -122,7 +114,7 @@ static void s390_free_insn_slot(struct kprobe *p)
 {
 	if (!p->ainsn.insn)
 		return;
-	if (is_kernel_addr(p->addr))
+	if (is_kernel((unsigned long)p->addr))
 		free_s390_insn_slot(p->ainsn.insn, 0);
 	else
 		free_insn_slot(p->ainsn.insn, 0);
@@ -241,6 +233,7 @@ static void pop_kprobe(struct kprobe_ctlblk *kcb)
 {
 	__this_cpu_write(current_kprobe, kcb->prev_kprobe.kp);
 	kcb->kprobe_status = kcb->prev_kprobe.status;
+	kcb->prev_kprobe.kp = NULL;
 }
 NOKPROBE_SYMBOL(pop_kprobe);
 
@@ -250,7 +243,7 @@ void arch_prepare_kretprobe(struct kretprobe_instance *ri, struct pt_regs *regs)
 	ri->fp = NULL;
 
 	/* Replace the return addr with trampoline addr */
-	regs->gprs[14] = (unsigned long) &kretprobe_trampoline;
+	regs->gprs[14] = (unsigned long) &__kretprobe_trampoline;
 }
 NOKPROBE_SYMBOL(arch_prepare_kretprobe);
 
@@ -269,7 +262,7 @@ static void kprobe_reenter_check(struct kprobe_ctlblk *kcb, struct kprobe *p)
 		 * is a BUG. The code path resides in the .kprobes.text
 		 * section and is executed with interrupts disabled.
 		 */
-		pr_err("Invalid kprobe detected.\n");
+		pr_err("Failed to recover from reentered kprobes.\n");
 		dump_kprobe(p);
 		BUG();
 	}
@@ -342,8 +335,8 @@ NOKPROBE_SYMBOL(kprobe_handler);
  */
 static void __used kretprobe_trampoline_holder(void)
 {
-	asm volatile(".global kretprobe_trampoline\n"
-		     "kretprobe_trampoline: bcr 0,0\n");
+	asm volatile(".global __kretprobe_trampoline\n"
+		     "__kretprobe_trampoline: bcr 0,0\n");
 }
 
 /*
@@ -351,7 +344,7 @@ static void __used kretprobe_trampoline_holder(void)
  */
 static int trampoline_probe_handler(struct kprobe *p, struct pt_regs *regs)
 {
-	regs->psw.addr = __kretprobe_trampoline_handler(regs, &kretprobe_trampoline, NULL);
+	regs->psw.addr = __kretprobe_trampoline_handler(regs, NULL);
 	/*
 	 * By returning a non-zero value, we are telling
 	 * kprobe_handler() that we don't want the post_handler
@@ -402,12 +395,11 @@ static int post_kprobe_handler(struct pt_regs *regs)
 	if (!p)
 		return 0;
 
+	resume_execution(p, regs);
 	if (kcb->kprobe_status != KPROBE_REENTER && p->post_handler) {
 		kcb->kprobe_status = KPROBE_HIT_SSDONE;
 		p->post_handler(p, regs, 0);
 	}
-
-	resume_execution(p, regs);
 	pop_kprobe(kcb);
 	preempt_enable_no_resched();
 
@@ -445,23 +437,6 @@ static int kprobe_trap_handler(struct pt_regs *regs, int trapnr)
 		break;
 	case KPROBE_HIT_ACTIVE:
 	case KPROBE_HIT_SSDONE:
-		/*
-		 * We increment the nmissed count for accounting,
-		 * we can also use npre/npostfault count for accounting
-		 * these specific fault cases.
-		 */
-		kprobes_inc_nmissed_count(p);
-
-		/*
-		 * We come here because instructions in the pre/post
-		 * handler caused the page_fault, this could happen
-		 * if handler tries to access user space by
-		 * copy_from_user(), get_user() etc. Let the
-		 * user-specified handler try to fix it first.
-		 */
-		if (p->fault_handler && p->fault_handler(p, regs, trapnr))
-			return 1;
-
 		/*
 		 * In case the user-specified fault handler returned
 		 * zero, try to fix up.
@@ -534,7 +509,7 @@ int kprobe_exceptions_notify(struct notifier_block *self,
 NOKPROBE_SYMBOL(kprobe_exceptions_notify);
 
 static struct kprobe trampoline = {
-	.addr = (kprobe_opcode_t *) &kretprobe_trampoline,
+	.addr = (kprobe_opcode_t *) &__kretprobe_trampoline,
 	.pre_handler = trampoline_probe_handler
 };
 
@@ -545,6 +520,6 @@ int __init arch_init_kprobes(void)
 
 int arch_trampoline_kprobe(struct kprobe *p)
 {
-	return p->addr == (kprobe_opcode_t *) &kretprobe_trampoline;
+	return p->addr == (kprobe_opcode_t *) &__kretprobe_trampoline;
 }
 NOKPROBE_SYMBOL(arch_trampoline_kprobe);

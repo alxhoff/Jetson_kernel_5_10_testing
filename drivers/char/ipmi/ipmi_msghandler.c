@@ -11,11 +11,12 @@
  * Copyright 2002 MontaVista Software Inc.
  */
 
-#define pr_fmt(fmt) "%s" fmt, "IPMI message handler: "
-#define dev_fmt pr_fmt
+#define pr_fmt(fmt) "IPMI message handler: " fmt
+#define dev_fmt(fmt) pr_fmt(fmt)
 
 #include <linux/module.h>
 #include <linux/errno.h>
+#include <linux/panic_notifier.h>
 #include <linux/poll.h>
 #include <linux/sched.h>
 #include <linux/seq_file.h>
@@ -49,11 +50,17 @@ static int handle_one_recv_msg(struct ipmi_smi *intf,
 static bool initialized;
 static bool drvregistered;
 
+/* Numbers in this enumerator should be mapped to ipmi_panic_event_str */
 enum ipmi_panic_event_op {
 	IPMI_SEND_PANIC_EVENT_NONE,
 	IPMI_SEND_PANIC_EVENT,
-	IPMI_SEND_PANIC_EVENT_STRING
+	IPMI_SEND_PANIC_EVENT_STRING,
+	IPMI_SEND_PANIC_EVENT_MAX
 };
+
+/* Indices in this array should be mapped to enum ipmi_panic_event_op */
+static const char *const ipmi_panic_event_str[] = { "none", "event", "string", NULL };
+
 #ifdef CONFIG_IPMI_PANIC_STRING
 #define IPMI_PANIC_DEFAULT IPMI_SEND_PANIC_EVENT_STRING
 #elif defined(CONFIG_IPMI_PANIC_EVENT)
@@ -68,46 +75,27 @@ static int panic_op_write_handler(const char *val,
 				  const struct kernel_param *kp)
 {
 	char valcp[16];
-	char *s;
+	int e;
 
-	strncpy(valcp, val, 15);
-	valcp[15] = '\0';
+	strscpy(valcp, val, sizeof(valcp));
+	e = match_string(ipmi_panic_event_str, -1, strstrip(valcp));
+	if (e < 0)
+		return e;
 
-	s = strstrip(valcp);
-
-	if (strcmp(s, "none") == 0)
-		ipmi_send_panic_event = IPMI_SEND_PANIC_EVENT_NONE;
-	else if (strcmp(s, "event") == 0)
-		ipmi_send_panic_event = IPMI_SEND_PANIC_EVENT;
-	else if (strcmp(s, "string") == 0)
-		ipmi_send_panic_event = IPMI_SEND_PANIC_EVENT_STRING;
-	else
-		return -EINVAL;
-
+	ipmi_send_panic_event = e;
 	return 0;
 }
 
 static int panic_op_read_handler(char *buffer, const struct kernel_param *kp)
 {
-	switch (ipmi_send_panic_event) {
-	case IPMI_SEND_PANIC_EVENT_NONE:
-		strcpy(buffer, "none\n");
-		break;
+	const char *event_str;
 
-	case IPMI_SEND_PANIC_EVENT:
-		strcpy(buffer, "event\n");
-		break;
+	if (ipmi_send_panic_event >= IPMI_SEND_PANIC_EVENT_MAX)
+		event_str = "???";
+	else
+		event_str = ipmi_panic_event_str[ipmi_send_panic_event];
 
-	case IPMI_SEND_PANIC_EVENT_STRING:
-		strcpy(buffer, "string\n");
-		break;
-
-	default:
-		strcpy(buffer, "???\n");
-		break;
-	}
-
-	return strlen(buffer);
+	return sprintf(buffer, "%s\n", event_str);
 }
 
 static const struct kernel_param_ops panic_op_ops = {
@@ -749,7 +737,8 @@ int ipmi_smi_watcher_register(struct ipmi_smi_watcher *watcher)
 	list_add(&watcher->link, &smi_watchers);
 
 	index = srcu_read_lock(&ipmi_interfaces_srcu);
-	list_for_each_entry_rcu(intf, &ipmi_interfaces, link) {
+	list_for_each_entry_rcu(intf, &ipmi_interfaces, link,
+			lockdep_is_held(&smi_watchers_mutex)) {
 		int intf_num = READ_ONCE(intf->intf_num);
 
 		if (intf_num == -1)
@@ -1284,6 +1273,7 @@ static void _ipmi_destroy_user(struct ipmi_user *user)
 	unsigned long    flags;
 	struct cmd_rcvr  *rcvr;
 	struct cmd_rcvr  *rcvrs = NULL;
+	struct module    *owner;
 
 	if (!acquire_ipmi_user(user, &i)) {
 		/*
@@ -1345,8 +1335,9 @@ static void _ipmi_destroy_user(struct ipmi_user *user)
 		kfree(rcvr);
 	}
 
+	owner = intf->owner;
 	kref_put(&intf->refcount, intf_free);
-	module_put(intf->owner);
+	module_put(owner);
 }
 
 int ipmi_destroy_user(struct ipmi_user *user)
@@ -2448,10 +2439,8 @@ retry:
 	wait_event(intf->waitq, bmc->dyn_id_set != 2);
 
 	if (!bmc->dyn_id_set) {
-		if ((bmc->cc == IPMI_DEVICE_IN_FW_UPDATE_ERR
-		     || bmc->cc ==  IPMI_DEVICE_IN_INIT_ERR
-		     || bmc->cc ==  IPMI_NOT_IN_MY_STATE_ERR)
-		     && ++retry_count <= GET_DEVICE_ID_MAX_RETRY) {
+		if (bmc->cc != IPMI_CC_NO_ERROR &&
+		    ++retry_count <= GET_DEVICE_ID_MAX_RETRY) {
 			msleep(500);
 			dev_warn(intf->si_dev,
 			    "BMC returned 0x%2.2x, retry get bmc device id\n",
@@ -3540,12 +3529,16 @@ static void deliver_smi_err_response(struct ipmi_smi *intf,
 				     struct ipmi_smi_msg *msg,
 				     unsigned char err)
 {
+	int rv;
 	msg->rsp[0] = msg->data[0] | 4;
 	msg->rsp[1] = msg->data[1];
 	msg->rsp[2] = err;
 	msg->rsp_size = 3;
-	/* It's an error, so it will never requeue, no need to check return. */
-	handle_one_recv_msg(intf, msg);
+
+	/* This will never requeue, but it may ask us to free the message. */
+	rv = handle_one_recv_msg(intf, msg);
+	if (rv == 0)
+		ipmi_free_smi_msg(msg);
 }
 
 static void cleanup_smi_msgs(struct ipmi_smi *intf)
@@ -5243,7 +5236,6 @@ module_exit(cleanup_ipmi);
 module_init(ipmi_init_msghandler_mod);
 MODULE_LICENSE("GPL");
 MODULE_AUTHOR("Corey Minyard <minyard@mvista.com>");
-MODULE_DESCRIPTION("Incoming and outgoing message routing for an IPMI"
-		   " interface.");
+MODULE_DESCRIPTION("Incoming and outgoing message routing for an IPMI interface.");
 MODULE_VERSION(IPMI_DRIVER_VERSION);
 MODULE_SOFTDEP("post: ipmi_devintf");

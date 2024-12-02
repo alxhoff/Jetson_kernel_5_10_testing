@@ -331,7 +331,7 @@ static void smack_log_callback(struct audit_buffer *ab, void *a)
  *  @object_label  : smack label of the object being accessed
  *  @request: requested permissions
  *  @result: result from smk_access
- *  @a:  auxiliary audit data
+ *  @ad:  auxiliary audit data
  *
  * Audit the granting or denial of permissions in accordance
  * with the policy.
@@ -395,6 +395,7 @@ struct hlist_head smack_known_hash[SMACK_HASH_SLOTS];
 
 /**
  * smk_insert_entry - insert a smack label into a hash map,
+ * @skp: smack label
  *
  * this function must be called under smack_known_lock
  */
@@ -475,8 +476,10 @@ char *smk_parse_smack(const char *string, int len)
 
 /**
  * smk_netlbl_mls - convert a catset to netlabel mls categories
+ * @level: MLS sensitivity level
  * @catset: the Smack categories
  * @sap: where to put the netlabel categories
+ * @len: number of bytes for the levels in a CIPSO IP option
  *
  * Allocates and fills attr.mls
  * Returns 0 on success, error code on failure.
@@ -520,8 +523,11 @@ int smk_netlbl_mls(int level, char *catset, struct netlbl_lsm_secattr *sap,
 int smack_populate_secattr(struct smack_known *skp)
 {
 	int slen;
+	struct lsmblob *blob;
 
-	skp->smk_netlabel.attr.secid = skp->smk_secid;
+	blob = &skp->smk_netlabel.attr.lsmblob;
+	lsmblob_init(blob, 0);
+	blob->secid[smack_lsmid.slot] = skp->smk_secid;
 	skp->smk_netlabel.domain = skp->smk_known;
 	skp->smk_netlabel.cache = netlbl_secattr_cache_alloc(GFP_ATOMIC);
 	if (skp->smk_netlabel.cache != NULL) {
@@ -687,10 +693,9 @@ bool smack_privileged_cred(int cap, const struct cred *cred)
 bool smack_privileged(int cap)
 {
 	/*
-	 * Kernel threads may not have credentials we can use.
-	 * The io_uring kernel threads do have reliable credentials.
+	 * All kernel tasks are privileged
 	 */
-	if ((current->flags & (PF_KTHREAD | PF_IO_WORKER)) == PF_KTHREAD)
+	if (unlikely(current->flags & PF_KTHREAD))
 		return true;
 
 	return smack_privileged_cred(cap, current_cred());

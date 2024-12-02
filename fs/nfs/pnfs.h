@@ -51,6 +51,8 @@ struct nfs4_pnfs_ds_addr {
 	size_t			da_addrlen;
 	struct list_head	da_node;  /* nfs4_pnfs_dev_hlist dev_dslist */
 	char			*da_remotestr;	/* human readable addr+port */
+	const char		*da_netid;
+	int			da_transport;
 };
 
 struct nfs4_pnfs_ds {
@@ -107,6 +109,7 @@ enum {
 	NFS_LAYOUT_FIRST_LAYOUTGET,	/* Serialize first layoutget */
 	NFS_LAYOUT_INODE_FREEING,	/* The inode is being freed */
 	NFS_LAYOUT_HASHED,		/* The layout visible */
+	NFS_LAYOUT_DRAIN,
 };
 
 enum layoutdriver_policy_flags {

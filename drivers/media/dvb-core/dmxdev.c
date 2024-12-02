@@ -720,7 +720,7 @@ static int dvb_dmxdev_filter_start(struct dmxdev_filter *filter)
 			ret = dmxdev->demux->allocate_section_feed(dmxdev->demux,
 								   secfeed,
 								   dvb_dmxdev_section_callback);
-			if (ret < 0) {
+			if (!*secfeed) {
 				pr_err("DVB (%s): could not alloc feed\n",
 				       __func__);
 				return ret;
@@ -799,6 +799,11 @@ static int dvb_demux_open(struct inode *inode, struct file *file)
 
 	if (mutex_lock_interruptible(&dmxdev->mutex))
 		return -ERESTARTSYS;
+
+	if (dmxdev->exit) {
+		mutex_unlock(&dmxdev->mutex);
+		return -ENODEV;
+	}
 
 	for (i = 0; i < dmxdev->filternum; i++)
 		if (dmxdev->filter[i].state == DMXDEV_STATE_FREE)
@@ -1458,7 +1463,10 @@ EXPORT_SYMBOL(dvb_dmxdev_init);
 
 void dvb_dmxdev_release(struct dmxdev *dmxdev)
 {
+	mutex_lock(&dmxdev->mutex);
 	dmxdev->exit = 1;
+	mutex_unlock(&dmxdev->mutex);
+
 	if (dmxdev->dvbdev->users > 1) {
 		wait_event(dmxdev->dvbdev->wait_queue,
 				dmxdev->dvbdev->users == 1);

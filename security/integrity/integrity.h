@@ -14,7 +14,7 @@
 
 #include <linux/types.h>
 #include <linux/integrity.h>
-#include <crypto/sha.h>
+#include <crypto/sha1.h>
 #include <linux/key.h>
 #include <linux/audit.h>
 
@@ -131,6 +131,8 @@ struct integrity_iint_cache {
 	unsigned long flags;
 	unsigned long measured_pcrs;
 	unsigned long atomic_flags;
+	unsigned long real_ino;
+	dev_t real_dev;
 	enum integrity_status ima_file_status:4;
 	enum integrity_status ima_mmap_status:4;
 	enum integrity_status ima_bprm_status:4;

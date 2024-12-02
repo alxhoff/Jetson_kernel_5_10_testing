@@ -23,13 +23,6 @@ module_param(rx_refill_threshold, uint, 0444);
 MODULE_PARM_DESC(rx_refill_threshold,
 		 "RX descriptor ring refill threshold (%)");
 
-/* Number of RX buffers to recycle pages for.  When creating the RX page recycle
- * ring, this number is divided by the number of buffers per page to calculate
- * the number of pages to store in the RX page recycle ring.
- */
-#define EFX_RECYCLE_RING_SIZE_IOMMU 4096
-#define EFX_RECYCLE_RING_SIZE_NOIOMMU (2 * EFX_RX_PREFERRED_BATCH)
-
 /* RX maximum head room required.
  *
  * This must be at least 1 to prevent overflow, plus one packet-worth
@@ -141,16 +134,7 @@ static void efx_init_rx_recycle_ring(struct efx_rx_queue *rx_queue)
 	unsigned int bufs_in_recycle_ring, page_ring_size;
 	struct efx_nic *efx = rx_queue->efx;
 
-	/* Set the RX recycle ring size */
-#ifdef CONFIG_PPC64
-	bufs_in_recycle_ring = EFX_RECYCLE_RING_SIZE_IOMMU;
-#else
-	if (iommu_present(&pci_bus_type))
-		bufs_in_recycle_ring = EFX_RECYCLE_RING_SIZE_IOMMU;
-	else
-		bufs_in_recycle_ring = EFX_RECYCLE_RING_SIZE_NOIOMMU;
-#endif /* CONFIG_PPC64 */
-
+	bufs_in_recycle_ring = efx_rx_recycle_ring_size(efx);
 	page_ring_size = roundup_pow_of_two(bufs_in_recycle_ring /
 					    efx->rx_bufs_per_page);
 	rx_queue->page_ring = kcalloc(page_ring_size,
@@ -273,7 +257,7 @@ void efx_init_rx_queue(struct efx_rx_queue *rx_queue)
 
 	/* Initialise XDP queue information */
 	rc = xdp_rxq_info_reg(&rx_queue->xdp_rxq_info, efx->net_dev,
-			      rx_queue->core_index);
+			      rx_queue->core_index, 0);
 
 	if (rc) {
 		netif_err(efx, rx_err, efx->net_dev,
@@ -676,17 +660,17 @@ bool efx_filter_spec_equal(const struct efx_filter_spec *left,
 	     (EFX_FILTER_FLAG_RX | EFX_FILTER_FLAG_TX)))
 		return false;
 
-	return memcmp(&left->outer_vid, &right->outer_vid,
+	return memcmp(&left->vport_id, &right->vport_id,
 		      sizeof(struct efx_filter_spec) -
-		      offsetof(struct efx_filter_spec, outer_vid)) == 0;
+		      offsetof(struct efx_filter_spec, vport_id)) == 0;
 }
 
 u32 efx_filter_spec_hash(const struct efx_filter_spec *spec)
 {
-	BUILD_BUG_ON(offsetof(struct efx_filter_spec, outer_vid) & 3);
-	return jhash2((const u32 *)&spec->outer_vid,
+	BUILD_BUG_ON(offsetof(struct efx_filter_spec, vport_id) & 3);
+	return jhash2((const u32 *)&spec->vport_id,
 		      (sizeof(struct efx_filter_spec) -
-		       offsetof(struct efx_filter_spec, outer_vid)) / 4,
+		       offsetof(struct efx_filter_spec, vport_id)) / 4,
 		      0);
 }
 
@@ -837,8 +821,10 @@ int efx_probe_filters(struct efx_nic *efx)
 		}
 
 		if (!success) {
-			efx_for_each_channel(channel, efx)
+			efx_for_each_channel(channel, efx) {
 				kfree(channel->rps_flow_id);
+				channel->rps_flow_id = NULL;
+			}
 			efx->type->filter_table_remove(efx);
 			rc = -ENOMEM;
 			goto out_unlock;

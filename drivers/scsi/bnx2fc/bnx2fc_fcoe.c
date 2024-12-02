@@ -16,6 +16,8 @@
 
 #include "bnx2fc.h"
 
+#include <linux/ethtool.h>
+
 static struct list_head adapter_list;
 static struct list_head if_list;
 static u32 adapter_count;
@@ -430,7 +432,6 @@ static int bnx2fc_rcv(struct sk_buff *skb, struct net_device *dev,
 	struct fcoe_ctlr *ctlr;
 	struct fcoe_rcv_info *fr;
 	struct fcoe_percpu_s *bg;
-	struct sk_buff *tmp_skb;
 
 	interface = container_of(ptype, struct bnx2fc_interface,
 				 fcoe_packet_type);
@@ -442,11 +443,9 @@ static int bnx2fc_rcv(struct sk_buff *skb, struct net_device *dev,
 		goto err;
 	}
 
-	tmp_skb = skb_share_check(skb, GFP_ATOMIC);
-	if (!tmp_skb)
-		goto err;
-
-	skb = tmp_skb;
+	skb = skb_share_check(skb, GFP_ATOMIC);
+	if (!skb)
+		return -1;
 
 	if (unlikely(eth_hdr(skb)->h_proto != htons(ETH_P_FCOE))) {
 		printk(KERN_ERR PFX "bnx2fc_rcv: Wrong FC type frame\n");
@@ -1792,7 +1791,7 @@ static void bnx2fc_unbind_pcidev(struct bnx2fc_hba *hba)
 /**
  * bnx2fc_ulp_get_stats - cnic callback to populate FCoE stats
  *
- * @handle:    transport handle pointing to adapter struture
+ * @handle:    transport handle pointing to adapter structure
  */
 static int bnx2fc_ulp_get_stats(void *handle)
 {
@@ -2084,7 +2083,7 @@ static int __bnx2fc_disable(struct fcoe_ctlr *ctlr)
 {
 	struct bnx2fc_interface *interface = fcoe_ctlr_priv(ctlr);
 
-	if (interface->enabled == true) {
+	if (interface->enabled) {
 		if (!ctlr->lp) {
 			pr_err(PFX "__bnx2fc_disable: lport not found\n");
 			return -ENODEV;
@@ -2182,7 +2181,7 @@ static int __bnx2fc_enable(struct fcoe_ctlr *ctlr)
 	struct cnic_fc_npiv_tbl *npiv_tbl;
 	struct fc_lport *lport;
 
-	if (interface->enabled == false) {
+	if (!interface->enabled) {
 		if (!ctlr->lp) {
 			pr_err(PFX "__bnx2fc_enable: lport not found\n");
 			return -ENODEV;
@@ -2273,7 +2272,7 @@ static int bnx2fc_ctlr_enabled(struct fcoe_ctlr_device *cdev)
 	case FCOE_CTLR_UNUSED:
 	default:
 		return -ENOTSUPP;
-	};
+	}
 }
 
 enum bnx2fc_create_link_state {

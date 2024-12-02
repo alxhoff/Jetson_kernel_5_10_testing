@@ -16,7 +16,6 @@ description: |
 maintainers:
   - Jon Hunter <jonathanh@nvidia.com>
   - Sameer Pujar <spujar@nvidia.com>
-  - Mohan Kumar D <mkumard@nvidia.com>
 
 properties:
   $nodename:
@@ -57,9 +56,34 @@ properties:
 
   ranges: true
 
-  "#sound-dai-cells":
-    description: The cell specifies number of DAIs.
-    const: 1
+  ports:
+    $ref: /schemas/graph.yaml#/properties/ports
+    description: |
+      Contains list of ACIF (Audio CIF) port nodes for AHUB (Audio Hub).
+      These are connected to ACIF interfaces of AHUB clients. Thus the
+      number of port nodes depend on the number of clients that AHUB may
+      have depending on the SoC revision.
+
+    patternProperties:
+      '^port@[0-9]':
+        $ref: audio-graph-port.yaml#
+        unevaluatedProperties: false
+
+patternProperties:
+  '^i2s@[0-9a-f]+$':
+    type: object
+
+  '^dmic@[0-9a-f]+$':
+    type: object
+    $ref: nvidia,tegra210-dmic.yaml#
+
+  '^admaif@[0-9a-f]+$':
+    type: object
+    $ref: nvidia,tegra210-admaif.yaml#
+
+  '^dspk@[0-9a-f]+$':
+    type: object
+    $ref: nvidia,tegra186-dspk.yaml#
 
 required:
   - compatible
@@ -71,10 +95,8 @@ required:
   - "#address-cells"
   - "#size-cells"
   - ranges
-  - "#sound-dai-cells"
 
-additionalProperties:
-  type: object
+additionalProperties: false
 
 examples:
   - |
@@ -90,7 +112,6 @@ examples:
         #address-cells = <1>;
         #size-cells = <1>;
         ranges = <0x702d0000 0x702d0000 0x0000e400>;
-        #sound-dai-cells = <1>;
 
         // All AHUB child nodes below
         admaif@702d0000 {
@@ -116,7 +137,6 @@ examples:
                     "rx8",  "tx8",
                     "rx9",  "tx9",
                     "rx10", "tx10";
-            #sound-dai-cells = <1>;
         };
 
         i2s@702d1000 {
@@ -128,7 +148,6 @@ examples:
             assigned-clock-parents = <&tegra_car TEGRA210_CLK_PLL_A_OUT0>;
             assigned-clock-rates = <1536000>;
             sound-name-prefix = "I2S1";
-            #sound-dai-cells = <1>;
         };
 
         dmic@702d4000 {
@@ -140,7 +159,6 @@ examples:
             assigned-clock-parents = <&tegra_car TEGRA210_CLK_PLL_A_OUT0>;
             assigned-clock-rates = <3072000>;
             sound-name-prefix = "DMIC1";
-            #sound-dai-cells = <1>;
         };
 
         // More child nodes to follow

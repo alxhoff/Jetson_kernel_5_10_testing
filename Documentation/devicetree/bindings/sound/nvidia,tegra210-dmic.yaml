@@ -15,7 +15,6 @@ description: |
 maintainers:
   - Jon Hunter <jonathanh@nvidia.com>
   - Sameer Pujar <spujar@nvidia.com>
-  - Mohan Kumar D <mkumard@nvidia.com>
 
 properties:
   $nodename:
@@ -57,12 +56,22 @@ properties:
       The name can be "DMIC1" or "DMIC2" ... "DMICx", where x depends
       on the maximum available instances on a Tegra SoC.
 
-  "#sound-dai-cells":
-    description: The cell specifies number of DAIs.
-    const: 1
+  ports:
+    $ref: /schemas/graph.yaml#/properties/ports
+    properties:
+      port@0:
+        $ref: audio-graph-port.yaml#
+        unevaluatedProperties: false
+        description: |
+          DMIC ACIF (Audio Client Interface) port connected to the
+          corresponding AHUB (Audio Hub) ACIF port.
 
-  nvidia,ahub-dmic-id:
-    description: Must be specified to uniquely identify DMIC instance
+      port@1:
+        $ref: audio-graph-port.yaml#
+        unevaluatedProperties: false
+        description: |
+          DMIC DAP (Digital Audio Port) interface which can be connected
+          to external audio codec for capture.
 
 required:
   - compatible
@@ -71,7 +80,6 @@ required:
   - clock-names
   - assigned-clocks
   - assigned-clock-parents
-  - "#sound-dai-cells"
 
 additionalProperties: false
 
@@ -87,9 +95,6 @@ examples:
         assigned-clocks = <&tegra_car TEGRA210_CLK_DMIC1>;
         assigned-clock-parents = <&tegra_car TEGRA210_CLK_PLL_A_OUT0>;
         assigned-clock-rates = <3072000>;
-        sound-name-prefix = "DMIC1";
-        #sound-dai-cells = <1>;
-        nvidia,ahub-dmic-id = <0>;
         sound-name-prefix = "DMIC1";
     };
 

@@ -50,6 +50,8 @@ source "drivers/usb/typec/tcpm/Kconfig"
 
 source "drivers/usb/typec/ucsi/Kconfig"
 
+source "drivers/usb/typec/tipd/Kconfig"
+
 config TYPEC_HD3SS3220
 	tristate "TI HD3SS3220 Type-C DRP Port controller driver"
 	depends on I2C
@@ -60,18 +62,6 @@ config TYPEC_HD3SS3220
 
 	  If you choose to build this driver as a dynamically linked module, the
 	  module will be called hd3ss3220.ko.
-
-config TYPEC_TPS6598X
-	tristate "TI TPS6598x USB Power Delivery controller driver"
-	depends on I2C
-	depends on REGMAP_I2C
-	depends on USB_ROLE_SWITCH || !USB_ROLE_SWITCH
-	help
-	  Say Y or M here if your system has TI TPS65982 or TPS65983 USB Power
-	  Delivery controller.
-
-	  If you choose to build this driver as a dynamically linked module, the
-	  module will be called tps6598x.ko.
 
 config TYPEC_STUSB160X
 	tristate "STMicroelectronics STUSB160x Type-C controller driver"
@@ -96,16 +86,6 @@ config TYPEC_QCOM_PMIC
 	  detection.
 
 	  It will also enable the VBUS output to connected devices when a
-	  DFP connection is made.
-
-config TYPEC_FUSB301
-	tristate "Onsemi FUSB301 Type-C controller driver"
-	depends on I2C
-	help
-	  Driver for supporting role switch over the Onsemi fusb301 chip.
-	  fusb301 handles the USB Type-C role and orientation detection.
-
-	  fusb301 also enables the VBUS output to connected devices when a
 	  DFP connection is made.
 
 source "drivers/usb/typec/mux/Kconfig"

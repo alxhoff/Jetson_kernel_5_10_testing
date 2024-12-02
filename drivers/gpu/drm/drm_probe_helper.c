@@ -488,8 +488,9 @@ retry:
 		 */
 		dev->mode_config.delayed_event = true;
 		if (dev->mode_config.poll_enabled)
-			schedule_delayed_work(&dev->mode_config.output_poll_work,
-					      0);
+			mod_delayed_work(system_wq,
+					 &dev->mode_config.output_poll_work,
+					 0);
 	}
 
 	/* Re-enable polling in case the global poll config changed. */
@@ -515,7 +516,8 @@ retry:
 	if (count == 0 && connector->status == connector_status_connected)
 		count = drm_add_override_edid_modes(connector);
 
-	if (count == 0 && connector->status == connector_status_connected)
+	if (count == 0 && (connector->status == connector_status_connected ||
+			   connector->status == connector_status_unknown))
 		count = drm_add_modes_noedid(connector, 1024, 768);
 	count += drm_helper_probe_add_cmdline_mode(connector);
 	if (count == 0)
@@ -756,7 +758,7 @@ EXPORT_SYMBOL(drm_kms_helper_poll_disable);
  * drm_kms_helper_poll_init - initialize and enable output polling
  * @dev: drm_device
  *
- * This function intializes and then also enables output polling support for
+ * This function initializes and then also enables output polling support for
  * @dev. Drivers which do not have reliable hotplug support in hardware can use
  * this helper infrastructure to regularly poll such connectors for changes in
  * their connection state.

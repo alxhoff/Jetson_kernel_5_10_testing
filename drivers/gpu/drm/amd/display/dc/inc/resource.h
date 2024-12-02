@@ -48,9 +48,9 @@ struct resource_caps {
 	int num_ddc;
 	int num_vmid;
 	int num_dsc;
-#if defined(CONFIG_DRM_AMD_DC_DCN3_0)
+	unsigned int num_dig_link_enc; // Total number of DIGs (digital encoders) in DIO (Display Input/Output).
+	unsigned int num_usb4_dpia; // Total number of USB4 DPIA (DisplayPort Input Adapters).
 	int num_mpc_3dlut;
-#endif
 };
 
 struct resource_straps {
@@ -114,6 +114,10 @@ int resource_get_clock_source_reference(
 		struct clock_source *clock_source);
 
 bool resource_are_streams_timing_synchronizable(
+		struct dc_stream_state *stream1,
+		struct dc_stream_state *stream2);
+
+bool resource_are_vblanks_synchronizable(
 		struct dc_stream_state *stream1,
 		struct dc_stream_state *stream2);
 

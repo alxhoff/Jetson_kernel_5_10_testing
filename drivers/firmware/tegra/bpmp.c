@@ -17,7 +17,6 @@
 
 #include <soc/tegra/bpmp.h>
 #include <soc/tegra/bpmp-abi.h>
-#include <soc/tegra/fuse.h>
 #include <soc/tegra/ivc.h>
 
 #include "bpmp-private.h"
@@ -39,6 +38,44 @@ channel_to_ops(struct tegra_bpmp_channel *channel)
 
 	return bpmp->soc->ops;
 }
+
+struct tegra_bpmp *of_tegra_bpmp_get(void)
+{
+	struct platform_device *pdev;
+	struct device_node *bpmp_dev;
+	struct tegra_bpmp *bpmp;
+
+	/* Check for bpmp device status in DT */
+	bpmp_dev = of_find_compatible_node(NULL, NULL, "nvidia,tegra186-bpmp");
+	if (!bpmp_dev) {
+		bpmp = ERR_PTR(-ENODEV);
+		goto err_out;
+	}
+	if (!of_device_is_available(bpmp_dev)) {
+		bpmp = ERR_PTR(-ENODEV);
+		goto err_put;
+	}
+
+	pdev = of_find_device_by_node(bpmp_dev);
+	if (!pdev) {
+		bpmp = ERR_PTR(-ENODEV);
+		goto err_put;
+	}
+
+	bpmp = platform_get_drvdata(pdev);
+	if (!bpmp) {
+		bpmp = ERR_PTR(-EPROBE_DEFER);
+		put_device(&pdev->dev);
+		goto err_put;
+	}
+
+	return bpmp;
+err_put:
+	of_node_put(bpmp_dev);
+err_out:
+	return bpmp;
+}
+EXPORT_SYMBOL_GPL(of_tegra_bpmp_get);
 
 struct tegra_bpmp *tegra_bpmp_get(struct device *dev)
 {
@@ -667,11 +704,8 @@ void tegra_bpmp_handle_rx(struct tegra_bpmp *bpmp)
 	count = bpmp->soc->channels.thread.count;
 	busy = bpmp->threaded.busy;
 
-	/* If supported incoming channel */
-	if (bpmp->soc->channels.cpu_rx.count != 0) {
-		if (tegra_bpmp_is_request_ready(channel))
-			tegra_bpmp_handle_mrq(bpmp, channel->ib->code, channel);
-	}
+	if (tegra_bpmp_is_request_ready(channel))
+		tegra_bpmp_handle_mrq(bpmp, channel->ib->code, channel);
 
 	spin_lock(&bpmp->lock);
 
@@ -783,11 +817,9 @@ static int tegra_bpmp_probe(struct platform_device *pdev)
 			goto free_mrq;
 	}
 
-	if (!tegra_platform_is_vdk()) {
-		err = tegra_bpmp_init_debugfs(bpmp);
-		if (err < 0)
-			dev_err(&pdev->dev, "debugfs initialization failed: %d\n", err);
-	}
+	err = tegra_bpmp_init_debugfs(bpmp);
+	if (err < 0)
+		dev_err(&pdev->dev, "debugfs initialization failed: %d\n", err);
 
 	return 0;
 
@@ -821,7 +853,6 @@ static const struct tegra_bpmp_soc tegra186_soc = {
 	.channels = {
 		.cpu_tx = {
 			.offset = 3,
-			.count = 1,
 			.timeout = 60 * USEC_PER_SEC,
 		},
 		.thread = {
@@ -831,50 +862,10 @@ static const struct tegra_bpmp_soc tegra186_soc = {
 		},
 		.cpu_rx = {
 			.offset = 13,
-			.count = 1,
 			.timeout = 0,
 		},
 	},
 	.ops = &tegra186_bpmp_ops,
-	.num_resets = 193,
-};
-
-static const struct tegra_bpmp_soc tegra186_hv_soc = {
-	.channels = {
-		.cpu_tx = {
-			.offset = 3,
-			.count = 1,
-			.timeout = 60 * USEC_PER_SEC,
-		},
-		.thread = {
-			.offset = 0,
-			.count = 3,
-			.timeout = 600 * USEC_PER_SEC,
-		},
-		.cpu_rx = {
-			.offset = 13,
-			.count = 1,
-			.timeout = 0,
-		},
-	},
-	.ops = &tegra186_bpmp_hv_ops,
-	.num_resets = 193,
-};
-
-static const struct tegra_bpmp_soc t194_safe_hv_soc = {
-	.channels = {
-		.cpu_tx = {
-			.offset = 3,
-			.count = 1,
-			.timeout = 60 * USEC_PER_SEC,
-		},
-		.thread = {
-			.offset = 0,
-			.count = 3,
-			.timeout = 600 * USEC_PER_SEC,
-		},
-	},
-	.ops = &tegra186_bpmp_hv_ops,
 	.num_resets = 193,
 };
 #endif
@@ -907,8 +898,6 @@ static const struct of_device_id tegra_bpmp_match[] = {
     IS_ENABLED(CONFIG_ARCH_TEGRA_194_SOC) || \
     IS_ENABLED(CONFIG_ARCH_TEGRA_234_SOC)
 	{ .compatible = "nvidia,tegra186-bpmp", .data = &tegra186_soc },
-	{ .compatible = "nvidia,tegra186-bpmp-hv", .data = &tegra186_hv_soc },
-	{ .compatible = "nvidia,tegra194-safe-bpmp-hv", .data = &t194_safe_hv_soc },
 #endif
 #if IS_ENABLED(CONFIG_ARCH_TEGRA_210_SOC)
 	{ .compatible = "nvidia,tegra210-bpmp", .data = &tegra210_soc },

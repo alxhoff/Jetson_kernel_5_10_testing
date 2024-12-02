@@ -9,6 +9,7 @@
 
 #include <generated/compile.h>
 #include <linux/build-salt.h>
+#include <linux/elfnote-lto.h>
 #include <linux/export.h>
 #include <linux/uts.h>
 #include <linux/utsname.h>
@@ -16,16 +17,8 @@
 #include <linux/version.h>
 #include <linux/proc_ns.h>
 
-#ifndef CONFIG_KALLSYMS
-#define version(a) Version_ ## a
-#define version_string(a) version(a)
-
-extern int version_string(LINUX_VERSION_CODE);
-int version_string(LINUX_VERSION_CODE);
-#endif
-
 struct uts_namespace init_uts_ns = {
-	.kref = KREF_INIT(2),
+	.ns.count = REFCOUNT_INIT(2),
 	.name = {
 		.sysname	= UTS_SYSNAME,
 		.nodename	= UTS_NODENAME,
@@ -45,7 +38,11 @@ EXPORT_SYMBOL_GPL(init_uts_ns);
 /* FIXED STRINGS! Don't touch! */
 const char linux_banner[] =
 	"Linux version " UTS_RELEASE " (" LINUX_COMPILE_BY "@"
-	LINUX_COMPILE_HOST ") (" LINUX_COMPILER ") " UTS_VERSION "\n";
+	LINUX_COMPILE_HOST ") (" LINUX_COMPILER ") " UTS_VERSION
+#ifdef CONFIG_VERSION_SIGNATURE
+        " (" CONFIG_VERSION_SIGNATURE ")"
+#endif
+	"\n";
 
 const char linux_proc_banner[] =
 	"%s version %s"
@@ -53,3 +50,4 @@ const char linux_proc_banner[] =
 	" (" LINUX_COMPILER ") %s\n";
 
 BUILD_SALT;
+BUILD_LTO_INFO;

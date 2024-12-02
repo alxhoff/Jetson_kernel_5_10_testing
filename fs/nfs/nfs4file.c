@@ -160,13 +160,11 @@ static ssize_t __nfs4_copy_file_range(struct file *file_in, loff_t pos_in,
 		sync = true;
 retry:
 	if (!nfs42_files_from_same_server(file_in, file_out)) {
-		/* for inter copy, if copy size if smaller than 12 RPC
-		 * payloads, fallback to traditional copy. There are
-		 * 14 RPCs during an NFSv4.x mount between source/dest
-		 * servers.
+		/*
+		 * for inter copy, if copy size is too small
+		 * then fallback to generic copy.
 		 */
-		if (sync ||
-			count <= 14 * NFS_SERVER(file_inode(file_in))->rsize)
+		if (sync)
 			return -EOPNOTSUPP;
 		cn_resp = kzalloc(sizeof(struct nfs42_copy_notify_res),
 				GFP_NOFS);
@@ -321,7 +319,7 @@ static int read_name_gen = 1;
 static struct file *__nfs42_ssc_open(struct vfsmount *ss_mnt,
 		struct nfs_fh *src_fh, nfs4_stateid *stateid)
 {
-	struct nfs_fattr fattr;
+	struct nfs_fattr *fattr = nfs_alloc_fattr();
 	struct file *filep, *res;
 	struct nfs_server *server;
 	struct inode *r_ino = NULL;
@@ -332,11 +330,17 @@ static struct file *__nfs42_ssc_open(struct vfsmount *ss_mnt,
 
 	server = NFS_SERVER(ss_mnt->mnt_root->d_inode);
 
-	nfs_fattr_init(&fattr);
+	if (!fattr)
+		return ERR_PTR(-ENOMEM);
 
-	status = nfs4_proc_getattr(server, src_fh, &fattr, NULL, NULL);
+	status = nfs4_proc_getattr(server, src_fh, fattr, NULL, NULL);
 	if (status < 0) {
 		res = ERR_PTR(status);
+		goto out;
+	}
+
+	if (!S_ISREG(fattr->mode)) {
+		res = ERR_PTR(-EBADF);
 		goto out;
 	}
 
@@ -347,7 +351,7 @@ static struct file *__nfs42_ssc_open(struct vfsmount *ss_mnt,
 		goto out;
 	snprintf(read_name, len, SSC_READ_NAME_BODY, read_name_gen++);
 
-	r_ino = nfs_fhget(ss_mnt->mnt_root->d_inode->i_sb, src_fh, &fattr,
+	r_ino = nfs_fhget(ss_mnt->mnt_root->d_inode->i_sb, src_fh, fattr,
 			NULL);
 	if (IS_ERR(r_ino)) {
 		res = ERR_CAST(r_ino);
@@ -358,6 +362,7 @@ static struct file *__nfs42_ssc_open(struct vfsmount *ss_mnt,
 				     r_ino->i_fop);
 	if (IS_ERR(filep)) {
 		res = ERR_CAST(filep);
+		iput(r_ino);
 		goto out_free_name;
 	}
 	filep->f_mode |= FMODE_READ;
@@ -392,6 +397,7 @@ static struct file *__nfs42_ssc_open(struct vfsmount *ss_mnt,
 out_free_name:
 	kfree(read_name);
 out:
+	nfs_free_fattr(fattr);
 	return res;
 out_stateowner:
 	nfs4_put_state_owner(sp);
@@ -437,6 +443,12 @@ void nfs42_ssc_unregister_ops(void)
 }
 #endif /* CONFIG_NFS_V4_2 */
 
+static int nfs4_setlease(struct file *file, long arg, struct file_lock **lease,
+			 void **priv)
+{
+	return nfs4_proc_setlease(file, arg, lease, priv);
+}
+
 const struct file_operations nfs4_file_operations = {
 	.read_iter	= nfs_file_read,
 	.write_iter	= nfs_file_write,
@@ -450,7 +462,7 @@ const struct file_operations nfs4_file_operations = {
 	.splice_read	= generic_file_splice_read,
 	.splice_write	= iter_file_splice_write,
 	.check_flags	= nfs_check_flags,
-	.setlease	= simple_nosetlease,
+	.setlease	= nfs4_setlease,
 #ifdef CONFIG_NFS_V4_2
 	.copy_file_range = nfs4_copy_file_range,
 	.llseek		= nfs4_file_llseek,

@@ -101,8 +101,8 @@ static void deflate_comp_exit(struct deflate_ctx *ctx)
 
 static void deflate_decomp_exit(struct deflate_ctx *ctx)
 {
-	if (ctx && ctx->decomp_stream.workspace)
-		vfree(ctx->decomp_stream.workspace);
+	zlib_inflateEnd(&ctx->decomp_stream);
+	vfree(ctx->decomp_stream.workspace);
 }
 
 static int __deflate_init(void *ctx, int format)

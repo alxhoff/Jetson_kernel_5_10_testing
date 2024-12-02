@@ -63,7 +63,7 @@ static void tomoyo_bprm_committed_creds(struct linux_binprm *bprm)
 
 #ifndef CONFIG_SECURITY_TOMOYO_OMIT_USERSPACE_LOADER
 /**
- * tomoyo_bprm_for_exec - Target for security_bprm_creds_for_exec().
+ * tomoyo_bprm_creds_for_exec - Target for security_bprm_creds_for_exec().
  *
  * @bprm: Pointer to "struct linux_binprm".
  *
@@ -113,8 +113,7 @@ static int tomoyo_bprm_check_security(struct linux_binprm *bprm)
 /**
  * tomoyo_inode_getattr - Target for security_inode_getattr().
  *
- * @mnt:    Pointer to "struct vfsmount".
- * @dentry: Pointer to "struct dentry".
+ * @path: Pointer to "struct path".
  *
  * Returns 0 on success, negative value otherwise.
  */
@@ -300,8 +299,7 @@ static int tomoyo_file_fcntl(struct file *file, unsigned int cmd,
 /**
  * tomoyo_file_open - Target for security_file_open().
  *
- * @f:    Pointer to "struct file".
- * @cred: Pointer to "struct cred".
+ * @f: Pointer to "struct file".
  *
  * Returns 0 on success, negative value otherwise.
  */
@@ -487,8 +485,8 @@ struct lsm_blob_sizes tomoyo_blob_sizes __lsm_ro_after_init = {
 /**
  * tomoyo_task_alloc - Target for security_task_alloc().
  *
- * @task:  Pointer to "struct task_struct".
- * @flags: clone() flags.
+ * @task:        Pointer to "struct task_struct".
+ * @clone_flags: clone() flags.
  *
  * Returns 0.
  */
@@ -522,6 +520,11 @@ static void tomoyo_task_free(struct task_struct *task)
 		s->old_domain_info = NULL;
 	}
 }
+
+static struct lsm_id tomoyo_lsmid __lsm_ro_after_init = {
+	.lsm  = "tomoyo",
+	.slot = LSMBLOB_NOT_NEEDED
+};
 
 /*
  * tomoyo_security_ops is a "struct security_operations" which is used for
@@ -575,7 +578,8 @@ static int __init tomoyo_init(void)
 	struct tomoyo_task *s = tomoyo_task(current);
 
 	/* register ourselves with the security framework */
-	security_add_hooks(tomoyo_hooks, ARRAY_SIZE(tomoyo_hooks), "tomoyo");
+	security_add_hooks(tomoyo_hooks, ARRAY_SIZE(tomoyo_hooks),
+			   &tomoyo_lsmid);
 	pr_info("TOMOYO Linux initialized\n");
 	s->domain_info = &tomoyo_kernel_domain;
 	atomic_inc(&tomoyo_kernel_domain.users);

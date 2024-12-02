@@ -124,12 +124,15 @@ static void dw8250_check_lcr(struct uart_port *p, int value)
 /* Returns once the transmitter is empty or we run out of retries */
 static void dw8250_tx_wait_empty(struct uart_port *p)
 {
+	struct uart_8250_port *up = up_to_u8250p(p);
 	unsigned int tries = 20000;
 	unsigned int delay_threshold = tries - 1000;
 	unsigned int lsr;
 
 	while (tries--) {
 		lsr = readb (p->membase + (UART_LSR << p->regshift));
+		up->lsr_saved_flags |= lsr & LSR_SAVE_FLAGS;
+
 		if (lsr & UART_LSR_TEMT)
 			break;
 
@@ -424,9 +427,6 @@ static void dw8250_quirks(struct uart_port *p, struct dw8250_data *data)
 		p->regshift = 2;
 		p->serial_in = dw8250_serial_in32;
 		data->uart_16550_compatible = true;
-	} else if (acpi_dev_present("NVDA0100", NULL, -1)) {
-		data->skip_autocfg = true;
-		p->flags |= UPF_FIXED_TYPE;
 	}
 
 	/* Platforms with iDMA 64-bit */
@@ -720,7 +720,6 @@ static const struct acpi_device_id dw8250_acpi_match[] = {
 	{ "AMDI0022", 0 },
 	{ "BRCM2032", 0 },
 	{ "HISI0031", 0 },
-	{ "NVDA0100", 0 },
 	{ },
 };
 MODULE_DEVICE_TABLE(acpi, dw8250_acpi_match);

@@ -222,6 +222,7 @@ void aa_free_profile(struct aa_profile *profile)
 	aa_free_file_rules(&profile->file);
 	aa_free_cap_rules(&profile->caps);
 	aa_free_rlimit_rules(&profile->rlimits);
+	kfree_sensitive(profile->net_compat);
 
 	for (i = 0; i < profile->xattr_count; i++)
 		kfree_sensitive(profile->xattrs[i]);
@@ -1125,7 +1126,7 @@ ssize_t aa_remove_profiles(struct aa_ns *policy_ns, struct aa_label *subj,
 
 	if (!name) {
 		/* remove namespace - can only happen if fqname[0] == ':' */
-		mutex_lock_nested(&ns->parent->lock, ns->level);
+		mutex_lock_nested(&ns->parent->lock, ns->parent->level);
 		__aa_bump_ns_revision(ns);
 		__aa_remove_ns(ns);
 		mutex_unlock(&ns->parent->lock);

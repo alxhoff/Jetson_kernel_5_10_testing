@@ -544,6 +544,8 @@ static int sunxi_pconf_set(struct pinctrl_dev *pctldev, unsigned pin,
 	struct sunxi_pinctrl *pctl = pinctrl_dev_get_drvdata(pctldev);
 	int i;
 
+	pin -= pctl->desc->pin_base;
+
 	for (i = 0; i < num_configs; i++) {
 		enum pin_config_param param;
 		unsigned long flags;
@@ -622,7 +624,7 @@ static int sunxi_pinctrl_set_io_bias_cfg(struct sunxi_pinctrl *pctl,
 					 unsigned pin,
 					 struct regulator *supply)
 {
-	unsigned short bank = pin / PINS_PER_BANK;
+	unsigned short bank;
 	unsigned long flags;
 	u32 val, reg;
 	int uV;
@@ -637,6 +639,9 @@ static int sunxi_pinctrl_set_io_bias_cfg(struct sunxi_pinctrl *pctl,
 	/* Might be dummy regulator with no voltage set */
 	if (uV == 0)
 		return 0;
+
+	pin -= pctl->desc->pin_base;
+	bank = pin / PINS_PER_BANK;
 
 	switch (pctl->desc->io_bias_cfg_variant) {
 	case BIAS_VOLTAGE_GRP_CONFIG:
@@ -654,8 +659,6 @@ static int sunxi_pinctrl_set_io_bias_cfg(struct sunxi_pinctrl *pctl,
 			val = 0xA; /* 3.0V */
 		else
 			val = 0xD; /* 3.3V */
-
-		pin -= pctl->desc->pin_base;
 
 		reg = readl(pctl->membase + sunxi_grp_config_reg(pin));
 		reg &= ~IO_BIAS_MASK;
@@ -1146,8 +1149,7 @@ static void sunxi_pinctrl_irq_handler(struct irq_desc *desc)
 		if (irq == pctl->irq[bank])
 			break;
 
-	if (bank == pctl->desc->irq_banks)
-		return;
+	WARN_ON(bank == pctl->desc->irq_banks);
 
 	chained_irq_enter(chip, desc);
 
@@ -1157,11 +1159,9 @@ static void sunxi_pinctrl_irq_handler(struct irq_desc *desc)
 	if (val) {
 		int irqoffset;
 
-		for_each_set_bit(irqoffset, &val, IRQ_PER_BANK) {
-			int pin_irq = irq_find_mapping(pctl->domain,
-						       bank * IRQ_PER_BANK + irqoffset);
-			generic_handle_irq(pin_irq);
-		}
+		for_each_set_bit(irqoffset, &val, IRQ_PER_BANK)
+			generic_handle_domain_irq(pctl->domain,
+						  bank * IRQ_PER_BANK + irqoffset);
 	}
 
 	chained_irq_exit(chip, desc);
@@ -1227,10 +1227,12 @@ static int sunxi_pinctrl_build_state(struct platform_device *pdev)
 	}
 
 	/*
-	 * We suppose that we won't have any more functions than pins,
-	 * we'll reallocate that later anyway
+	 * Find an upper bound for the maximum number of functions: in
+	 * the worst case we have gpio_in, gpio_out, irq and up to four
+	 * special functions per pin, plus one entry for the sentinel.
+	 * We'll reallocate that later anyway.
 	 */
-	pctl->functions = kcalloc(pctl->ngroups,
+	pctl->functions = kcalloc(4 * pctl->ngroups + 4,
 				  sizeof(*pctl->functions),
 				  GFP_KERNEL);
 	if (!pctl->functions)

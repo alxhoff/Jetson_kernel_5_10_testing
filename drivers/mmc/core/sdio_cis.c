@@ -238,22 +238,6 @@ static const struct cis_tpl cis_tpl_list[] = {
 	{	0x21,	2,	/* cistpl_funcid */	},
 	{	0x22,	0,	cistpl_funce		},
 	{	0x91,	2,	/* cistpl_sdio_std */	},
-	{	0x80,	0,	/* vendor unique tuple */	},
-	{	0x81,	0,	/* vendor unique tuple */	},
-	{	0x82,	0,	/* vendor unique tuple */	},
-	{	0x83,	0,	/* vendor unique tuple */	},
-	{	0x84,	0,	/* vendor unique tuple */	},
-	{	0x85,	0,	/* vendor unique tuple */	},
-	{	0x86,	0,	/* vendor unique tuple */	},
-	{	0x87,	0,	/* vendor unique tuple */	},
-	{	0x88,	0,	/* vendor unique tuple */	},
-	{	0x89,	0,	/* vendor unique tuple */	},
-	{	0x8a,	0,	/* vendor unique tuple */	},
-	{	0x8b,	0,	/* vendor unique tuple */	},
-	{	0x8c,	0,	/* vendor unique tuple */	},
-	{	0x8d,	0,	/* vendor unique tuple */	},
-	{	0x8e,	0,	/* vendor unique tuple */	},
-	{	0x8f,	0,	/* vendor unique tuple */	},
 };
 
 static int sdio_read_cis(struct mmc_card *card, struct sdio_func *func)
@@ -346,13 +330,25 @@ static int sdio_read_cis(struct mmc_card *card, struct sdio_func *func)
 			prev = &this->next;
 
 			if (ret == -ENOENT) {
+
 				if (time_after(jiffies, timeout))
 					break;
-				/* warn about unknown tuples */
-				pr_warn_ratelimited("%s: queuing unknown"
-				       " CIS tuple 0x%02x (%u bytes)\n",
-				       mmc_hostname(card->host),
-				       tpl_code, tpl_link);
+
+#define FMT(type) "%s: queuing " type " CIS tuple 0x%02x [%*ph] (%u bytes)\n"
+				/*
+				 * Tuples in this range are reserved for
+				 * vendors, so don't warn about them
+				 */
+				if (tpl_code >= 0x80 && tpl_code <= 0x8f)
+					pr_debug_ratelimited(FMT("vendor"),
+						mmc_hostname(card->host),
+						tpl_code, tpl_link, this->data,
+						tpl_link);
+				else
+					pr_warn_ratelimited(FMT("unknown"),
+						mmc_hostname(card->host),
+						tpl_code, tpl_link, this->data,
+						tpl_link);
 			}
 
 			/* keep on analyzing tuples */
@@ -408,12 +404,6 @@ int sdio_read_func_cis(struct sdio_func *func)
 		return ret;
 
 	/*
-	 * Since we've linked to tuples in the card structure,
-	 * we must make sure we have a reference to it.
-	 */
-	get_device(&func->card->dev);
-
-	/*
 	 * Vendor/device id is optional for function CIS, so
 	 * copy it from the card structure as needed.
 	 */
@@ -438,11 +428,5 @@ void sdio_free_func_cis(struct sdio_func *func)
 	}
 
 	func->tuples = NULL;
-
-	/*
-	 * We have now removed the link to the tuples in the
-	 * card structure, so remove the reference.
-	 */
-	put_device(&func->card->dev);
 }
 

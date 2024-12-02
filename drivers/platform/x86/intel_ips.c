@@ -829,7 +829,7 @@ static u16 calc_avg_temp(struct ips_driver *ips, u16 *array)
 
 static u16 read_mgtv(struct ips_driver *ips)
 {
-	u16 ret;
+	u16 __maybe_unused ret;
 	u64 slope, offset;
 	u64 val;
 
@@ -1430,6 +1430,14 @@ static const struct dmi_system_id ips_blacklist[] = {
 		.matches = {
 			DMI_MATCH(DMI_SYS_VENDOR, "Hewlett-Packard"),
 			DMI_MATCH(DMI_PRODUCT_NAME, "HP ProBook"),
+		},
+	},
+	{
+		.callback = ips_blacklist_callback,
+		.ident = "G60JX",
+		.matches = {
+			DMI_MATCH(DMI_SYS_VENDOR, "ASUSTeK Computer Inc."),
+			DMI_MATCH(DMI_PRODUCT_NAME, "G60JX"),
 		},
 	},
 	{ }	/* terminating entry */

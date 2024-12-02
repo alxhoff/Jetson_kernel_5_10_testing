@@ -1,7 +1,6 @@
 /*
  * Copyright (c) 2013, Kenneth MacKay
  * All rights reserved.
- * Copyright (c) 2017-2020, NVIDIA Corporation. All Rights Reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted provided that the following conditions are
@@ -27,105 +26,38 @@
 #ifndef _CRYPTO_ECC_H
 #define _CRYPTO_ECC_H
 
+#include <crypto/ecc_curve.h>
+#include <asm/unaligned.h>
+
 /* One digit is u64 qword. */
 #define ECC_CURVE_NIST_P192_DIGITS  3
 #define ECC_CURVE_NIST_P256_DIGITS  4
-#include <crypto/ecc.h>
+#define ECC_CURVE_NIST_P384_DIGITS  6
+#define ECC_MAX_DIGITS              (512 / 64) /* due to ecrdsa */
 
-#include "ecc_curve_defs.h"
+#define ECC_DIGITS_TO_BYTES_SHIFT 3
 
-const struct ecc_curve *ecc_get_curve(unsigned int curve_id);
-struct ecc_point *ecc_alloc_point(unsigned int ndigits);
-void ecc_free_point(struct ecc_point *p);
-
-void vli_clear(u64 *vli, unsigned int ndigits);
-bool vli_is_zero(const u64 *vli, unsigned int ndigits);
-unsigned int vli_num_digits(const u64 *vli, unsigned int ndigits);
-unsigned int vli_num_bits(const u64 *vli, unsigned int ndigits);
-void vli_set(u64 *dest, const u64 *src, unsigned int ndigits);
-void vli_copy_to_buf(u8 *dst_buf, unsigned int buf_len,
-		     const u64 *src_vli, unsigned int ndigits);
-void vli_copy_from_buf(u64 *dst_vli, unsigned int ndigits,
-		       const u8 *src_buf, unsigned int buf_len);
-int vli_cmp(const u64 *left, const u64 *right, unsigned int ndigits);
-u64 vli_lshift(u64 *result, const u64 *in, unsigned int shift,
-	       unsigned int ndigits);
-void vli_rshift1(u64 *vli, unsigned int ndigits);
-u64 vli_add(u64 *result, const u64 *left, const u64 *right,
-	    unsigned int ndigits);
-u64 vli_sub(u64 *result, const u64 *left, const u64 *right,
-	    unsigned int ndigits);
-void vli_mult(u64 *result, const u64 *left, const u64 *right,
-	      unsigned int ndigits);
-void vli_square(u64 *result, const u64 *left, unsigned int ndigits);
-void vli_mod_add(u64 *result, const u64 *left, const u64 *right,
-		 const u64 *mod, unsigned int ndigits);
-void vli_mod_sub(u64 *result, const u64 *left, const u64 *right,
-		 const u64 *mod, unsigned int ndigits);
-void vli_mod(u64 *result, const u64 *input, const u64 *mod,
-	     unsigned int ndigits);
-void vli_print(char *vli_name, const u64 *vli, unsigned int ndigits);
-void vli_mod_mult(u64 *result, const u64 *left, const u64 *right,
-		  const u64 *mod, unsigned int ndigits);
-bool vli_mmod_fast(u64 *result, u64 *product,
-		   const u64 *curve_prime, unsigned int ndigits);
-void vli_mod_mult_fast(u64 *result, const u64 *left, const u64 *right,
-		       const u64 *curve_prime, unsigned int ndigits);
-void vli_mod_square_fast(u64 *result, const u64 *left,
-			 const u64 *curve_prime, unsigned int ndigits);
-void vli_mod_inv(u64 *result, const u64 *input, const u64 *mod,
-		 unsigned int ndigits);
-
-bool ecc_point_is_zero(const struct ecc_point *point);
-void ecc_point_double_jacobian(u64 *x1, u64 *y1, u64 *z1,
-			       u64 *curve_prime, unsigned int ndigits);
-void ecc_point_add(u64 *x1, u64 *y1, u64 *x2, u64 *y2, u64 *curve_prime,
-		   unsigned int ndigits);
-void ecc_point_mult(struct ecc_point *result,
-		    const struct ecc_point *point, const u64 *scalar,
-		    u64 *initial_z, const struct ecc_curve *curve,
-		    unsigned int ndigits);
-void ecc_swap_digits(const u64 *in, u64 *out, unsigned int ndigits);
-
-/**
- * struct ecc_point - elliptic curve point in affine coordinates
- *
- * @x:		X coordinate in vli form.
- * @y:		Y coordinate in vli form.
- * @ndigits:	Length of vlis in u64 qwords.
- */
-struct ecc_point {
-	u64 *x;
-	u64 *y;
-	u8 ndigits;
-};
+#define ECC_MAX_BYTES (ECC_MAX_DIGITS << ECC_DIGITS_TO_BYTES_SHIFT)
 
 #define ECC_POINT_INIT(x, y, ndigits)	(struct ecc_point) { x, y, ndigits }
 
 /**
- * struct ecc_curve - definition of elliptic curve
- *
- * @name:	Short name of the curve.
- * @g:		Generator point of the curve.
- * @p:		Prime number, if Barrett's reduction is used for this curve
- *		pre-calculated value 'mu' is appended to the @p after ndigits.
- *		Use of Barrett's reduction is heuristically determined in
- *		vli_mmod_fast().
- * @n:		Order of the curve group.
- * @a:		Curve parameter a.
- * @b:		Curve parameter b.
+ * ecc_swap_digits() - Copy ndigits from big endian array to native array
+ * @in:       Input array
+ * @out:      Output array
+ * @ndigits:  Number of digits to copy
  */
-struct ecc_curve {
-	char *name;
-	struct ecc_point g;
-	u64 *p;
-	u64 *n;
-	u64 *a;
-	u64 *b;
-};
+static inline void ecc_swap_digits(const void *in, u64 *out, unsigned int ndigits)
+{
+	const __be64 *src = (__force __be64 *)in;
+	int i;
+
+	for (i = 0; i < ndigits; i++)
+		out[i] = get_unaligned_be64(&src[ndigits - 1 - i]);
+}
 
 /**
- * ecc_is_key_valid() - Validate a given ECC private key
+ * ecc_is_key_valid() - Validate a given ECDH private key
  *
  * @curve_id:		id representing the curve to use
  * @ndigits:		curve's number of digits
@@ -164,6 +96,25 @@ int ecc_gen_privkey(unsigned int curve_id, unsigned int ndigits, u64 *privkey);
  */
 int ecc_make_pub_key(const unsigned int curve_id, unsigned int ndigits,
 		     const u64 *private_key, u64 *public_key);
+
+/**
+ * crypto_ecdh_shared_secret() - Compute a shared secret
+ *
+ * @curve_id:		id representing the curve to use
+ * @ndigits:		curve's number of digits
+ * @private_key:	private key of part A
+ * @public_key:		public key of counterpart B
+ * @secret:		buffer for storing the calculated shared secret
+ *
+ * Note: It is recommended that you hash the result of crypto_ecdh_shared_secret
+ * before using it for symmetric encryption or HMAC.
+ *
+ * Returns 0 if the shared secret was generated successfully, a negative value
+ * if an error occurred.
+ */
+int crypto_ecdh_shared_secret(unsigned int curve_id, unsigned int ndigits,
+			      const u64 *private_key, const u64 *public_key,
+			      u64 *secret);
 
 /**
  * ecc_is_pubkey_valid_partial() - Partial public key validation
@@ -291,8 +242,4 @@ void ecc_point_mult_shamir(const struct ecc_point *result,
 			   const u64 *x, const struct ecc_point *p,
 			   const u64 *y, const struct ecc_point *q,
 			   const struct ecc_curve *curve);
-
-int ecc_is_pub_key_valid(unsigned int curve_id, unsigned int ndigits,
-			 const u8 *pub_key, unsigned int pub_key_len);
-
-#endif /* _CRYPTO_ECC_H */
+#endif

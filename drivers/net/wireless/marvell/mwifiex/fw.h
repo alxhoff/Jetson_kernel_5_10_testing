@@ -177,6 +177,7 @@ enum MWIFIEX_802_11_PRIVACY_FILTER {
 #define TLV_TYPE_STA_MAC_ADDR       (PROPRIETARY_TLV_BASE_ID + 32)
 #define TLV_TYPE_BSSID              (PROPRIETARY_TLV_BASE_ID + 35)
 #define TLV_TYPE_CHANNELBANDLIST    (PROPRIETARY_TLV_BASE_ID + 42)
+#define TLV_TYPE_UAP_MAC_ADDRESS    (PROPRIETARY_TLV_BASE_ID + 43)
 #define TLV_TYPE_UAP_BEACON_PERIOD  (PROPRIETARY_TLV_BASE_ID + 44)
 #define TLV_TYPE_UAP_DTIM_PERIOD    (PROPRIETARY_TLV_BASE_ID + 45)
 #define TLV_TYPE_UAP_BCAST_SSID     (PROPRIETARY_TLV_BASE_ID + 48)
@@ -217,6 +218,7 @@ enum MWIFIEX_802_11_PRIVACY_FILTER {
 #define TLV_TYPE_CHANNEL_STATS      (PROPRIETARY_TLV_BASE_ID + 198)
 #define TLV_BTCOEX_WL_AGGR_WINSIZE  (PROPRIETARY_TLV_BASE_ID + 202)
 #define TLV_BTCOEX_WL_SCANTIME      (PROPRIETARY_TLV_BASE_ID + 203)
+#define TLV_TYPE_LED_CONTROL        (PROPRIETARY_TLV_BASE_ID + 205)
 #define TLV_TYPE_BSS_MODE           (PROPRIETARY_TLV_BASE_ID + 206)
 #define TLV_TYPE_RANDOM_MAC         (PROPRIETARY_TLV_BASE_ID + 236)
 #define TLV_TYPE_CHAN_ATTR_CFG      (PROPRIETARY_TLV_BASE_ID + 237)
@@ -364,6 +366,7 @@ enum MWIFIEX_802_11_PRIVACY_FILTER {
 #define HostCmd_CMD_802_11_AD_HOC_JOIN                0x002c
 #define HostCmd_CMD_802_11_AD_HOC_STOP                0x0040
 #define HostCmd_CMD_802_11_MAC_ADDRESS                0x004D
+#define HostCmd_CMD_802_11_LED_CONTROL                0X004E
 #define HostCmd_CMD_802_11D_DOMAIN_INFO               0x005b
 #define HostCmd_CMD_802_11_KEY_MATERIAL               0x005e
 #define HostCmd_CMD_802_11_BG_SCAN_CONFIG             0x006b
@@ -995,6 +998,11 @@ struct host_cmd_ds_802_11_key_material {
 	struct mwifiex_ie_type_key_param_set key_param_set;
 } __packed;
 
+struct host_cmd_ds_802_11_key_material_wep {
+	__le16 action;
+	struct mwifiex_ie_type_key_param_set key_param_set[NUM_WEP_KEYS];
+} __packed;
+
 struct host_cmd_ds_gen {
 	__le16 command;
 	__le16 size;
@@ -1196,6 +1204,16 @@ struct ieee_types_oper_mode_ntf {
 	u8 oper_mode;
 } __packed;
 
+struct mwifiex_led_param {
+	__le16 mode;
+	__le16 on;
+} __packed;
+
+struct mwifiex_ie_types_led_param {
+	struct mwifiex_ie_types_header header;
+	struct mwifiex_led_param led_cfg;
+} __packed;
+
 struct host_cmd_ds_802_11_ad_hoc_start {
 	u8 ssid[IEEE80211_MAX_SSID_LEN];
 	u8 bss_mode;
@@ -1317,6 +1335,11 @@ struct host_cmd_ds_802_11_hs_cfg_enh {
 		struct mwifiex_hs_config_param hs_config;
 		struct hs_activate_param hs_activate;
 	} params;
+} __packed;
+
+struct host_cmd_ds_802_11_led_control {
+	__le16 action;
+	__le16 num_led;
 } __packed;
 
 enum SNMP_MIB_INDEX {
@@ -2347,6 +2370,7 @@ struct host_cmd_ds_command {
 		struct host_cmd_ds_wmm_get_status get_wmm_status;
 		struct host_cmd_ds_802_11_key_material key_material;
 		struct host_cmd_ds_802_11_key_material_v2 key_material_v2;
+		struct host_cmd_ds_802_11_key_material_wep key_material_wep;
 		struct host_cmd_ds_version_ext verext;
 		struct host_cmd_ds_mgmt_frame_reg reg_mask;
 		struct host_cmd_ds_remain_on_chan roc_cfg;
@@ -2373,6 +2397,7 @@ struct host_cmd_ds_command {
 		struct host_cmd_sdio_sp_rx_aggr_cfg sdio_rx_aggr_cfg;
 		struct host_cmd_ds_multi_chan_policy mc_policy;
 		struct host_cmd_ds_robust_coex coex;
+		struct host_cmd_ds_802_11_led_control led_cfg;
 		struct host_cmd_ds_wakeup_reason hs_wakeup_reason;
 		struct host_cmd_ds_gtk_rekey_params rekey;
 		struct host_cmd_ds_chan_region_cfg reg_cfg;

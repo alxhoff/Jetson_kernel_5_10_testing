@@ -2,7 +2,7 @@
 //
 // tegra186_asrc.c - Tegra186 ASRC driver
 //
-// Copyright (c) 2015-2023, NVIDIA CORPORATION.  All rights reserved.
+// Copyright (c) 2022, NVIDIA CORPORATION. All rights reserved.
 
 #include <linux/clk.h>
 #include <linux/delay.h>
@@ -14,42 +14,32 @@
 #include <linux/platform_device.h>
 #include <linux/pm_runtime.h>
 #include <linux/regmap.h>
-#include <linux/tegra186_ahc.h>
 #include <sound/core.h>
 #include <sound/pcm.h>
 #include <sound/pcm_params.h>
 #include <sound/soc.h>
 
-#include "tegra186_arad.h"
 #include "tegra186_asrc.h"
-#include "tegra210_ahub.h"
 #include "tegra_cif.h"
 
-#define ASRC_ARAM_START_ADDR 0x3F800000
-#define RATIO_ARAD	0
-#define RATIO_SW	1
+#define ASRC_STREAM_SOURCE_SELECT(id)					       \
+	(TEGRA186_ASRC_CFG + ((id) * TEGRA186_ASRC_STREAM_STRIDE))
 
-#define ASRC_STREAM_SOURCE_SELECT(id)	\
-	(TEGRA186_ASRC_STREAM1_CONFIG + id*TEGRA186_ASRC_STREAM_STRIDE)
+#define ASRC_STREAM_REG(reg, id) ((reg) + ((id) * TEGRA186_ASRC_STREAM_STRIDE))
 
-#define ASRC_STREAM_REG(reg, id) (reg + (id * TEGRA186_ASRC_STREAM_STRIDE))
-
-#define ASRC_STREAM_REG_DEFAULTS(id) \
-	{ ASRC_STREAM_REG(TEGRA186_ASRC_STREAM1_CONFIG, id), ((id+1)<<4)}, \
-	{ ASRC_STREAM_REG(TEGRA186_ASRC_STREAM1_RATIO_INTEGER_PART, id), 0x1}, \
-	{ ASRC_STREAM_REG(TEGRA186_ASRC_STREAM1_RATIO_FRAC_PART, id), 0x0}, \
-	{ ASRC_STREAM_REG(TEGRA186_ASRC_STREAM1_MUTE_UNMUTE_DURATION, id), 0x400}, \
-	{ ASRC_STREAM_REG(TEGRA186_ASRC_STREAM1_RX_CIF_CTRL, id), 0x7500}, \
-	{ ASRC_STREAM_REG(TEGRA186_ASRC_STREAM1_TX_CIF_CTRL, id), 0x7500}, \
-	{ ASRC_STREAM_REG(TEGRA186_ASRC_STREAM1_ENABLE, id), 0x0}, \
-	{ ASRC_STREAM_REG(TEGRA186_ASRC_STREAM1_SOFT_RESET, id), 0x0}, \
-	{ ASRC_STREAM_REG(TEGRA186_ASRC_STREAM1_STATEBUF_ADDR, id), 0x0}, \
-	{ ASRC_STREAM_REG(TEGRA186_ASRC_STREAM1_STATEBUF_CONFIG, id), 0x445}, \
-	{ ASRC_STREAM_REG(TEGRA186_ASRC_STREAM1_INSAMPLEBUF_ADDR, id), 0x0}, \
-	{ ASRC_STREAM_REG(TEGRA186_ASRC_STREAM1_INSAMPLEBUF_CONFIG, id), 0x64}, \
-	{ ASRC_STREAM_REG(TEGRA186_ASRC_STREAM1_OUTSAMPLEBUF_ADDR, id), 0x4b0}, \
-	{ ASRC_STREAM_REG(TEGRA186_ASRC_STREAM1_OUTSAMPLEBUF_CONFIG, id), 0x64}
-static struct device *asrc_dev;
+#define ASRC_STREAM_REG_DEFAULTS(id)					       \
+	{ ASRC_STREAM_REG(TEGRA186_ASRC_CFG, id),			       \
+	  (((id) + 1) << 4) },						       \
+	{ ASRC_STREAM_REG(TEGRA186_ASRC_RATIO_INT_PART, id),		       \
+	  0x1 },							       \
+	{ ASRC_STREAM_REG(TEGRA186_ASRC_RATIO_FRAC_PART, id),		       \
+	  0x0 },							       \
+	{ ASRC_STREAM_REG(TEGRA186_ASRC_MUTE_UNMUTE_DURATION, id),	       \
+	  0x400 },							       \
+	{ ASRC_STREAM_REG(TEGRA186_ASRC_RX_CIF_CTRL, id),		       \
+	  0x7500 },							       \
+	{ ASRC_STREAM_REG(TEGRA186_ASRC_TX_CIF_CTRL, id),		       \
+	  0x7500 }
 
 static const struct reg_default tegra186_asrc_reg_defaults[] = {
 	ASRC_STREAM_REG_DEFAULTS(0),
@@ -61,13 +51,11 @@ static const struct reg_default tegra186_asrc_reg_defaults[] = {
 
 	{ TEGRA186_ASRC_GLOBAL_ENB, 0},
 	{ TEGRA186_ASRC_GLOBAL_SOFT_RESET, 0},
-	{ TEGRA186_ASRC_GLOBAL_CG, 1},
+	{ TEGRA186_ASRC_GLOBAL_CG, 0x1 },
+	{ TEGRA186_ASRC_GLOBAL_CFG, 0x0 },
 	{ TEGRA186_ASRC_GLOBAL_SCRATCH_ADDR, 0},
-	{ TEGRA186_ASRC_GLOBAL_SCRATCH_CONFIG, 0x0c207980},
-	{ TEGRA186_ASRC_RATIO_UPD_RX_CIF_CTRL, 0x00115500},
-	{ TEGRA186_ASRC_RATIO_UPD_RX_STATUS, 0},
-	{ TEGRA186_ASRC_GLOBAL_STATUS, 0},
-	{ TEGRA186_ASRC_GLOBAL_STREAM_ENABLE_STATUS, 0},
+	{ TEGRA186_ASRC_GLOBAL_SCRATCH_CFG, 0x0c207980 },
+	{ TEGRA186_ASRC_RATIO_UPD_RX_CIF_CTRL, 0x00115500 },
 	{ TEGRA186_ASRC_GLOBAL_INT_MASK, 0x0},
 	{ TEGRA186_ASRC_GLOBAL_INT_SET, 0x0},
 	{ TEGRA186_ASRC_GLOBAL_INT_CLEAR, 0x0},
@@ -80,139 +68,68 @@ static const struct reg_default tegra186_asrc_reg_defaults[] = {
 	{ TEGRA186_ASRC_CYA, 0x0},
 };
 
-
-static int tegra186_asrc_get_stream_enable_status(struct tegra186_asrc *asrc,
-				unsigned int lane_id)
-{
-	int val;
-
-	regmap_read(asrc->regmap,
-		ASRC_STREAM_REG(
-			TEGRA186_ASRC_STREAM1_STATUS, lane_id),
-		&val);
-
-	return val & 0x01;
-
-}
-
-static int tegra186_asrc_get_ratio_lock_status(struct tegra186_asrc *asrc,
-				unsigned int lane_id)
-{
-	int val;
-
-	regmap_read(asrc->regmap,
-		ASRC_STREAM_REG(
-			TEGRA186_ASRC_STREAM1_RATIO_LOCK_STATUS, lane_id),
-		&val);
-
-	return val & 0x1;
-}
-
-static void tegra186_asrc_set_ratio_lock_status(struct tegra186_asrc *asrc,
-				unsigned int lane_id)
+static void tegra186_asrc_lock_stream(struct tegra186_asrc *asrc,
+				      unsigned int id)
 {
 	regmap_write(asrc->regmap,
-		ASRC_STREAM_REG(
-			TEGRA186_ASRC_STREAM1_RATIO_LOCK_STATUS, lane_id), 1);
+		     ASRC_STREAM_REG(TEGRA186_ASRC_RATIO_LOCK_STATUS,
+				     id),
+		     1);
 }
 
-int tegra186_asrc_set_source(int id, int source)
-{
-	struct tegra186_asrc *asrc = dev_get_drvdata(asrc_dev);
-
-	regmap_update_bits(asrc->regmap,
-		ASRC_STREAM_REG(TEGRA186_ASRC_STREAM1_CONFIG, id),
-		TEGRA186_ASRC_STREAM_RATIO_TYPE_MASK, (source & 1));
-
-	return 0;
-}
-
-int tegra186_asrc_update_ratio(int id, int inte, int frac)
-{
-	struct tegra186_asrc *asrc = dev_get_drvdata(asrc_dev);
-
-	regmap_write(asrc->regmap, ASRC_STREAM_REG(
-		TEGRA186_ASRC_STREAM1_RATIO_INTEGER_PART, id),
-		inte);
-	regmap_write(asrc->regmap, ASRC_STREAM_REG(
-		TEGRA186_ASRC_STREAM1_RATIO_FRAC_PART, id),
-		frac);
-
-	tegra186_asrc_set_ratio_lock_status(asrc, (unsigned int)id);
-
-	return 0;
-}
-
-static int tegra186_asrc_runtime_suspend(struct device *dev)
+static int __maybe_unused tegra186_asrc_runtime_suspend(struct device *dev)
 {
 	struct tegra186_asrc *asrc = dev_get_drvdata(dev);
 
-#ifdef CONFIG_TEGRA186_AHC
-	regmap_write(asrc->regmap, TEGRA186_ASRC_GLOBAL_INT_MASK, 0x1);
-#endif
 	regcache_cache_only(asrc->regmap, true);
 	regcache_mark_dirty(asrc->regmap);
 
 	return 0;
 }
 
-static int tegra186_asrc_runtime_resume(struct device *dev)
+static int __maybe_unused tegra186_asrc_runtime_resume(struct device *dev)
 {
 	struct tegra186_asrc *asrc = dev_get_drvdata(dev);
-	int lane_id;
+	int id;
 
 	regcache_cache_only(asrc->regmap, false);
+
+	/*
+	 * Below sequence is recommended after a runtime PM cycle.
+	 * This otherwise leads to transfer failures. The cache
+	 * sync is done after this to restore other settings.
+	 */
+	regmap_write(asrc->regmap, TEGRA186_ASRC_GLOBAL_SCRATCH_ADDR,
+		     TEGRA186_ASRC_ARAM_START_ADDR);
+	regmap_write(asrc->regmap, TEGRA186_ASRC_GLOBAL_ENB,
+		     TEGRA186_ASRC_GLOBAL_EN);
+
 	regcache_sync(asrc->regmap);
 
-	/* HW needs sw reset to make sure previous
-		transaction was clean */
-	regmap_write(asrc->regmap,
-		TEGRA186_ASRC_GLOBAL_SOFT_RESET, 0x1);
-	/* Set global starting address of the buffer in ARAM */
-	regmap_write(asrc->regmap,
-		TEGRA186_ASRC_GLOBAL_SCRATCH_ADDR,
-		ASRC_ARAM_START_ADDR);
+	for (id = 0; id < TEGRA186_ASRC_STREAM_MAX; id++) {
+		if (asrc->lane[id].ratio_source !=
+		    TEGRA186_ASRC_RATIO_SOURCE_SW)
+			continue;
 
-	regmap_write(asrc->regmap, TEGRA186_ASRC_GLOBAL_INT_MASK,
-		0x01);
-	/* set global enable */
-	regmap_write(asrc->regmap,
-		TEGRA186_ASRC_GLOBAL_ENB, TEGRA186_ASRC_GLOBAL_EN);
+		regmap_write(asrc->regmap,
+			ASRC_STREAM_REG(TEGRA186_ASRC_RATIO_INT_PART,
+					id),
+			asrc->lane[id].int_part);
 
-	regmap_write(asrc->regmap, TEGRA186_ASRC_GLOBAL_INT_CLEAR,
-		0x01);
-	/**
-	 * Hw Bug:200208400 - asrc interrupt status gets cleared when
-	 * it is cleared twice. This WAR is only applicable for T186
-	 */
-	if (of_machine_is_compatible("nvidia,tegra186-asrc"))
-		regmap_write(asrc->regmap, TEGRA186_ASRC_GLOBAL_INT_CLEAR, 0x1);
+		regmap_write(asrc->regmap,
+			ASRC_STREAM_REG(TEGRA186_ASRC_RATIO_FRAC_PART,
+					id),
+			asrc->lane[id].frac_part);
 
-	for (lane_id = 0; lane_id < 6; lane_id++) {
-		if (asrc->lane[lane_id].ratio_source == RATIO_SW) {
-			regmap_write(asrc->regmap,
-				ASRC_STREAM_REG(
-				TEGRA186_ASRC_STREAM1_RATIO_INTEGER_PART,
-				lane_id),
-				asrc->lane[lane_id].int_part);
-			regmap_write(asrc->regmap,
-				ASRC_STREAM_REG(
-					TEGRA186_ASRC_STREAM1_RATIO_FRAC_PART,
-					lane_id),
-				asrc->lane[lane_id].frac_part);
-			tegra186_asrc_set_ratio_lock_status(asrc, lane_id);
-		}
+		tegra186_asrc_lock_stream(asrc, id);
 	}
-#ifdef CONFIG_TEGRA186_AHC
-	regmap_write(asrc->regmap, TEGRA186_ASRC_GLOBAL_INT_MASK, 0x0);
-#endif
 
 	return 0;
 }
 
 static int tegra186_asrc_set_audio_cif(struct tegra186_asrc *asrc,
-				struct snd_pcm_hw_params *params,
-				unsigned int reg)
+				       struct snd_pcm_hw_params *params,
+				       unsigned int reg)
 {
 	int channels, audio_bits;
 	struct tegra_cif_conf cif_conf;
@@ -237,26 +154,27 @@ static int tegra186_asrc_set_audio_cif(struct tegra186_asrc *asrc,
 	cif_conf.client_ch = channels;
 	cif_conf.audio_bits = audio_bits;
 	cif_conf.client_bits = TEGRA_ACIF_BITS_24;
+
 	tegra_set_cif(asrc->regmap, reg, &cif_conf);
 
 	return 0;
 }
 
 static int tegra186_asrc_in_hw_params(struct snd_pcm_substream *substream,
-				 struct snd_pcm_hw_params *params,
-				 struct snd_soc_dai *dai)
+				      struct snd_pcm_hw_params *params,
+				      struct snd_soc_dai *dai)
 {
 	struct device *dev = dai->dev;
 	struct tegra186_asrc *asrc = snd_soc_dai_get_drvdata(dai);
-	int ret, lane_id = dai->id;
+	int ret, id = dai->id;
 
-	/* set threshold */
+	/* Set input threshold */
 	regmap_write(asrc->regmap,
-		ASRC_STREAM_REG(TEGRA186_ASRC_STREAM1_RX_THRESHOLD, dai->id),
-		asrc->lane[lane_id].input_thresh);
+		     ASRC_STREAM_REG(TEGRA186_ASRC_RX_THRESHOLD, dai->id),
+		     asrc->lane[id].input_thresh);
 
 	ret = tegra186_asrc_set_audio_cif(asrc, params,
-		ASRC_STREAM_REG(TEGRA186_ASRC_STREAM1_RX_CIF_CTRL, dai->id));
+		ASRC_STREAM_REG(TEGRA186_ASRC_RX_CIF_CTRL, dai->id));
 	if (ret) {
 		dev_err(dev, "Can't set ASRC RX%d CIF: %d\n", dai->id, ret);
 		return ret;
@@ -266,69 +184,62 @@ static int tegra186_asrc_in_hw_params(struct snd_pcm_substream *substream,
 }
 
 static int tegra186_asrc_out_hw_params(struct snd_pcm_substream *substream,
-				 struct snd_pcm_hw_params *params,
-				 struct snd_soc_dai *dai)
+				       struct snd_pcm_hw_params *params,
+				       struct snd_soc_dai *dai)
 {
 	struct device *dev = dai->dev;
 	struct tegra186_asrc *asrc = snd_soc_dai_get_drvdata(dai);
-	int ret, lane_id = dai->id - 7, dcnt = 10;
+	int ret, id = dai->id - 7;
 
-	regmap_update_bits(asrc->regmap,
-		ASRC_STREAM_REG(TEGRA186_ASRC_STREAM1_CONFIG, lane_id),
-		1, asrc->lane[lane_id].ratio_source);
+	 /* Set output threshold */
+	regmap_write(asrc->regmap,
+		     ASRC_STREAM_REG(TEGRA186_ASRC_TX_THRESHOLD, id),
+		     asrc->lane[id].output_thresh);
 
 	ret = tegra186_asrc_set_audio_cif(asrc, params,
-		ASRC_STREAM_REG(TEGRA186_ASRC_STREAM1_TX_CIF_CTRL, lane_id));
+		ASRC_STREAM_REG(TEGRA186_ASRC_TX_CIF_CTRL, id));
 	if (ret) {
-		dev_err(dev, "Can't set ASRC TX%d CIF: %d\n", lane_id, ret);
+		dev_err(dev, "Can't set ASRC TX%d CIF: %d\n", id, ret);
 		return ret;
 	}
 
-	/* set ENABLE_HW_RATIO_COMP */
-	if (asrc->lane[lane_id].hwcomp_disable) {
+	/* Set ENABLE_HW_RATIO_COMP */
+	if (asrc->lane[id].hwcomp_disable) {
 		regmap_update_bits(asrc->regmap,
-			ASRC_STREAM_REG(TEGRA186_ASRC_STREAM1_CONFIG, lane_id),
+			ASRC_STREAM_REG(TEGRA186_ASRC_CFG, id),
 			TEGRA186_ASRC_STREAM_ENABLE_HW_RATIO_COMP_MASK,
 			TEGRA186_ASRC_STREAM_ENABLE_HW_RATIO_COMP_DISABLE);
 	} else {
 		regmap_update_bits(asrc->regmap,
-			ASRC_STREAM_REG(TEGRA186_ASRC_STREAM1_CONFIG, lane_id),
+			ASRC_STREAM_REG(TEGRA186_ASRC_CFG, id),
 			TEGRA186_ASRC_STREAM_ENABLE_HW_RATIO_COMP_MASK,
 			TEGRA186_ASRC_STREAM_ENABLE_HW_RATIO_COMP_ENABLE);
 
 		regmap_write(asrc->regmap,
-			ASRC_STREAM_REG(
-			TEGRA186_ASRC_STREAM1_RATIO_COMP, lane_id),
+			ASRC_STREAM_REG(TEGRA186_ASRC_RATIO_COMP, id),
 			TEGRA186_ASRC_STREAM_DEFAULT_HW_COMP_BIAS_VALUE);
 	}
 
-	/* set lock */
-	if (asrc->lane[lane_id].ratio_source == RATIO_SW) {
-		regmap_write(asrc->regmap,
-			ASRC_STREAM_REG(
-				TEGRA186_ASRC_STREAM1_RATIO_INTEGER_PART,
-				lane_id),
-			asrc->lane[lane_id].int_part);
-		regmap_write(asrc->regmap,
-			ASRC_STREAM_REG(
-				TEGRA186_ASRC_STREAM1_RATIO_FRAC_PART, lane_id),
-			asrc->lane[lane_id].frac_part);
-		tegra186_asrc_set_ratio_lock_status(asrc, lane_id);
-	} else
-		while (!tegra186_asrc_get_ratio_lock_status(asrc, lane_id) &&
-			dcnt--)
-			udelay(100);
+	/* Set lock */
+	regmap_update_bits(asrc->regmap,
+			   ASRC_STREAM_REG(TEGRA186_ASRC_CFG, id),
+			   1, asrc->lane[id].ratio_source);
 
-	 /* set threshold */
-	regmap_write(asrc->regmap,
-		ASRC_STREAM_REG(TEGRA186_ASRC_STREAM1_TX_THRESHOLD, lane_id),
-		asrc->lane[lane_id].output_thresh);
+	if (asrc->lane[id].ratio_source == TEGRA186_ASRC_RATIO_SOURCE_SW) {
+		regmap_write(asrc->regmap,
+			ASRC_STREAM_REG(TEGRA186_ASRC_RATIO_INT_PART, id),
+			asrc->lane[id].int_part);
+		regmap_write(asrc->regmap,
+			ASRC_STREAM_REG(TEGRA186_ASRC_RATIO_FRAC_PART, id),
+			asrc->lane[id].frac_part);
+		tegra186_asrc_lock_stream(asrc, id);
+	}
 
 	return ret;
 }
 
 static int tegra186_asrc_get_ratio_source(struct snd_kcontrol *kcontrol,
-	struct snd_ctl_elem_value *ucontrol)
+					  struct snd_ctl_elem_value *ucontrol)
 {
 	struct soc_enum *asrc_private =
 		(struct soc_enum  *)kcontrol->private_value;
@@ -336,62 +247,33 @@ static int tegra186_asrc_get_ratio_source(struct snd_kcontrol *kcontrol,
 	struct tegra186_asrc *asrc = snd_soc_component_get_drvdata(cmpnt);
 	unsigned int id = asrc_private->reg / TEGRA186_ASRC_STREAM_STRIDE;
 
-	/* get the source of a lane in asrc */
-	ucontrol->value.integer.value[0] = asrc->lane[id].ratio_source;
+	ucontrol->value.enumerated.item[0] = asrc->lane[id].ratio_source;
 
 	return 0;
 }
 
 static int tegra186_asrc_put_ratio_source(struct snd_kcontrol *kcontrol,
-	struct snd_ctl_elem_value *ucontrol)
+					  struct snd_ctl_elem_value *ucontrol)
 {
 	struct soc_enum *asrc_private =
 		(struct soc_enum  *)kcontrol->private_value;
 	struct snd_soc_component *cmpnt = snd_soc_kcontrol_component(kcontrol);
 	struct tegra186_asrc *asrc = snd_soc_component_get_drvdata(cmpnt);
 	unsigned int id = asrc_private->reg / TEGRA186_ASRC_STREAM_STRIDE;
+	bool change = false;
 
-	/* update the source of the lane */
-	asrc->lane[id].ratio_source = ucontrol->value.integer.value[0];
-	regmap_update_bits(asrc->regmap, asrc_private->reg,
-		TEGRA186_ASRC_STREAM_RATIO_TYPE_MASK,
-		asrc->lane[id].ratio_source);
+	asrc->lane[id].ratio_source = ucontrol->value.enumerated.item[0];
 
-	return 0;
-}
+	regmap_update_bits_check(asrc->regmap, asrc_private->reg,
+				 TEGRA186_ASRC_STREAM_RATIO_TYPE_MASK,
+				 asrc->lane[id].ratio_source,
+				 &change);
 
-static int tegra186_asrc_get_enable_stream(struct snd_kcontrol *kcontrol,
-	struct snd_ctl_elem_value *ucontrol)
-{
-	struct soc_mixer_control *asrc_private =
-		(struct soc_mixer_control *)kcontrol->private_value;
-	struct snd_soc_component *cmpnt = snd_soc_kcontrol_component(kcontrol);
-	struct tegra186_asrc *asrc = snd_soc_component_get_drvdata(cmpnt);
-	unsigned int enable;
-
-	regmap_read(asrc->regmap, asrc_private->reg, &enable);
-	ucontrol->value.integer.value[0] = enable;
-
-	return 0;
-}
-
-static int tegra186_asrc_put_enable_stream(struct snd_kcontrol *kcontrol,
-	struct snd_ctl_elem_value *ucontrol)
-{
-	struct soc_mixer_control *asrc_private =
-		(struct soc_mixer_control *)kcontrol->private_value;
-	struct snd_soc_component *cmpnt = snd_soc_kcontrol_component(kcontrol);
-	struct tegra186_asrc *asrc = snd_soc_component_get_drvdata(cmpnt);
-	unsigned int enable = 0;
-
-	enable = ucontrol->value.integer.value[0];
-	regmap_write(asrc->regmap, asrc_private->reg, enable);
-
-	return 0;
+	return change ? 1 : 0;
 }
 
 static int tegra186_asrc_get_ratio_int(struct snd_kcontrol *kcontrol,
-	struct snd_ctl_elem_value *ucontrol)
+				       struct snd_ctl_elem_value *ucontrol)
 {
 	struct soc_mixer_control *asrc_private =
 		(struct soc_mixer_control *)kcontrol->private_value;
@@ -400,33 +282,46 @@ static int tegra186_asrc_get_ratio_int(struct snd_kcontrol *kcontrol,
 	unsigned int id = asrc_private->reg / TEGRA186_ASRC_STREAM_STRIDE;
 
 	regmap_read(asrc->regmap,
-		ASRC_STREAM_REG(TEGRA186_ASRC_STREAM1_RATIO_INTEGER_PART, id),
-		&asrc->lane[id].int_part);
+		    ASRC_STREAM_REG(TEGRA186_ASRC_RATIO_INT_PART, id),
+		    &asrc->lane[id].int_part);
+
 	ucontrol->value.integer.value[0] = asrc->lane[id].int_part;
 
 	return 0;
 }
 
 static int tegra186_asrc_put_ratio_int(struct snd_kcontrol *kcontrol,
-	struct snd_ctl_elem_value *ucontrol)
+				       struct snd_ctl_elem_value *ucontrol)
 {
 	struct soc_mixer_control *asrc_private =
 		(struct soc_mixer_control *)kcontrol->private_value;
 	struct snd_soc_component *cmpnt = snd_soc_kcontrol_component(kcontrol);
 	struct tegra186_asrc *asrc = snd_soc_component_get_drvdata(cmpnt);
 	unsigned int id = asrc_private->reg / TEGRA186_ASRC_STREAM_STRIDE;
+	bool change = false;
+
+	if (asrc->lane[id].ratio_source == TEGRA186_ASRC_RATIO_SOURCE_ARAD) {
+		dev_err(cmpnt->dev,
+			"Lane %d ratio source is ARAD, invalid SW update\n",
+			id);
+		return -EINVAL;
+	}
 
 	asrc->lane[id].int_part = ucontrol->value.integer.value[0];
-	regmap_write(asrc->regmap,
-		ASRC_STREAM_REG(TEGRA186_ASRC_STREAM1_RATIO_INTEGER_PART, id),
-		asrc->lane[id].int_part);
-	tegra186_asrc_set_ratio_lock_status(asrc, id);
 
-	return 0;
+	regmap_update_bits_check(asrc->regmap,
+				 ASRC_STREAM_REG(TEGRA186_ASRC_RATIO_INT_PART,
+						 id),
+				 TEGRA186_ASRC_STREAM_RATIO_INT_PART_MASK,
+				 asrc->lane[id].int_part, &change);
+
+	tegra186_asrc_lock_stream(asrc, id);
+
+	return change ? 1 : 0;
 }
 
 static int tegra186_asrc_get_ratio_frac(struct snd_kcontrol *kcontrol,
-	struct snd_ctl_elem_value *ucontrol)
+					struct snd_ctl_elem_value *ucontrol)
 {
 	struct soc_mreg_control *asrc_private =
 		(struct soc_mreg_control *)kcontrol->private_value;
@@ -435,33 +330,46 @@ static int tegra186_asrc_get_ratio_frac(struct snd_kcontrol *kcontrol,
 	unsigned int id = asrc_private->regbase / TEGRA186_ASRC_STREAM_STRIDE;
 
 	regmap_read(asrc->regmap,
-		ASRC_STREAM_REG(TEGRA186_ASRC_STREAM1_RATIO_FRAC_PART, id),
-		&asrc->lane[id].frac_part);
+		    ASRC_STREAM_REG(TEGRA186_ASRC_RATIO_FRAC_PART, id),
+		    &asrc->lane[id].frac_part);
+
 	ucontrol->value.integer.value[0] = asrc->lane[id].frac_part;
 
 	return 0;
 }
 
 static int tegra186_asrc_put_ratio_frac(struct snd_kcontrol *kcontrol,
-	struct snd_ctl_elem_value *ucontrol)
+					struct snd_ctl_elem_value *ucontrol)
 {
 	struct soc_mreg_control *asrc_private =
 		(struct soc_mreg_control *)kcontrol->private_value;
 	struct snd_soc_component *cmpnt = snd_soc_kcontrol_component(kcontrol);
 	struct tegra186_asrc *asrc = snd_soc_component_get_drvdata(cmpnt);
 	unsigned int id = asrc_private->regbase / TEGRA186_ASRC_STREAM_STRIDE;
+	bool change = false;
+
+	if (asrc->lane[id].ratio_source == TEGRA186_ASRC_RATIO_SOURCE_ARAD) {
+		dev_err(cmpnt->dev,
+			"Lane %d ratio source is ARAD, invalid SW update\n",
+			id);
+		return -EINVAL;
+	}
 
 	asrc->lane[id].frac_part = ucontrol->value.integer.value[0];
-	regmap_write(asrc->regmap,
-		ASRC_STREAM_REG(TEGRA186_ASRC_STREAM1_RATIO_FRAC_PART, id),
-		asrc->lane[id].frac_part);
-	tegra186_asrc_set_ratio_lock_status(asrc, id);
 
-	return 0;
+	regmap_update_bits_check(asrc->regmap,
+				 ASRC_STREAM_REG(TEGRA186_ASRC_RATIO_FRAC_PART,
+						 id),
+				 TEGRA186_ASRC_STREAM_RATIO_FRAC_PART_MASK,
+				 asrc->lane[id].frac_part, &change);
+
+	tegra186_asrc_lock_stream(asrc, id);
+
+	return change ? 1 : 0;
 }
 
 static int tegra186_asrc_get_hwcomp_disable(struct snd_kcontrol *kcontrol,
-    struct snd_ctl_elem_value *ucontrol)
+					    struct snd_ctl_elem_value *ucontrol)
 {
 	struct soc_mixer_control *asrc_private =
 		(struct soc_mixer_control *)kcontrol->private_value;
@@ -475,21 +383,25 @@ static int tegra186_asrc_get_hwcomp_disable(struct snd_kcontrol *kcontrol,
 }
 
 static int tegra186_asrc_put_hwcomp_disable(struct snd_kcontrol *kcontrol,
-    struct snd_ctl_elem_value *ucontrol)
+					    struct snd_ctl_elem_value *ucontrol)
 {
 	struct soc_mixer_control *asrc_private =
 		(struct soc_mixer_control *)kcontrol->private_value;
 	struct snd_soc_component *cmpnt = snd_soc_kcontrol_component(kcontrol);
 	struct tegra186_asrc *asrc = snd_soc_component_get_drvdata(cmpnt);
 	unsigned int id = asrc_private->reg / TEGRA186_ASRC_STREAM_STRIDE;
+	int value = ucontrol->value.integer.value[0];
 
-	asrc->lane[id].hwcomp_disable = ucontrol->value.integer.value[0];
+	if (value == asrc->lane[id].hwcomp_disable)
+		return 0;
 
-	return 0;
+	asrc->lane[id].hwcomp_disable = value;
+
+	return 1;
 }
 
 static int tegra186_asrc_get_input_threshold(struct snd_kcontrol *kcontrol,
-	struct snd_ctl_elem_value *ucontrol)
+					     struct snd_ctl_elem_value *ucontrol)
 {
 	struct soc_mixer_control *asrc_private =
 		(struct soc_mixer_control *)kcontrol->private_value;
@@ -503,21 +415,26 @@ static int tegra186_asrc_get_input_threshold(struct snd_kcontrol *kcontrol,
 }
 
 static int tegra186_asrc_put_input_threshold(struct snd_kcontrol *kcontrol,
-    struct snd_ctl_elem_value *ucontrol)
+					     struct snd_ctl_elem_value *ucontrol)
 {
 	struct soc_mixer_control *asrc_private =
 		(struct soc_mixer_control *)kcontrol->private_value;
 	struct snd_soc_component *cmpnt = snd_soc_kcontrol_component(kcontrol);
 	struct tegra186_asrc *asrc = snd_soc_component_get_drvdata(cmpnt);
 	unsigned int id = asrc_private->reg / TEGRA186_ASRC_STREAM_STRIDE;
+	int value = (asrc->lane[id].input_thresh & ~(0x3)) |
+		    ucontrol->value.integer.value[0];
 
-	asrc->lane[id].input_thresh = (asrc->lane[id].input_thresh & ~(0x3))
-				| ucontrol->value.integer.value[0];
-    return 0;
+	if (value == asrc->lane[id].input_thresh)
+		return 0;
+
+	asrc->lane[id].input_thresh = value;
+
+	return 1;
 }
 
 static int tegra186_asrc_get_output_threshold(struct snd_kcontrol *kcontrol,
-	struct snd_ctl_elem_value *ucontrol)
+					      struct snd_ctl_elem_value *ucontrol)
 {
 	struct soc_mixer_control *asrc_private =
 		(struct soc_mixer_control *)kcontrol->private_value;
@@ -531,163 +448,193 @@ static int tegra186_asrc_get_output_threshold(struct snd_kcontrol *kcontrol,
 }
 
 static int tegra186_asrc_put_output_threshold(struct snd_kcontrol *kcontrol,
-	struct snd_ctl_elem_value *ucontrol)
+					      struct snd_ctl_elem_value *ucontrol)
 {
 	struct soc_mixer_control *asrc_private =
 		(struct soc_mixer_control *)kcontrol->private_value;
 	struct snd_soc_component *cmpnt = snd_soc_kcontrol_component(kcontrol);
 	struct tegra186_asrc *asrc = snd_soc_component_get_drvdata(cmpnt);
 	unsigned int id = asrc_private->reg / TEGRA186_ASRC_STREAM_STRIDE;
+	int value = (asrc->lane[id].output_thresh & ~(0x3)) |
+		    ucontrol->value.integer.value[0];
 
-	asrc->lane[id].output_thresh = (asrc->lane[id].output_thresh & ~(0x3))
-				| ucontrol->value.integer.value[0];
+	if (value == asrc->lane[id].output_thresh)
+		return 0;
+
+	asrc->lane[id].output_thresh = value;
+
+	return 1;
+}
+
+static int tegra186_asrc_widget_event(struct snd_soc_dapm_widget *w,
+					struct snd_kcontrol *kcontrol, int event)
+{
+	struct snd_soc_component *cmpnt = snd_soc_dapm_to_component(w->dapm);
+	struct tegra186_asrc *asrc = dev_get_drvdata(cmpnt->dev);
+	unsigned int id =
+		(w->reg - TEGRA186_ASRC_ENABLE) / TEGRA186_ASRC_STREAM_STRIDE;
+
+	regmap_write(asrc->regmap,
+		     ASRC_STREAM_REG(TEGRA186_ASRC_SOFT_RESET, id),
+		     0x1);
 
 	return 0;
 }
-static int tegra186_asrc_req_arad_ratio(struct snd_soc_dapm_widget *w,
-				struct snd_kcontrol *kcontrol, int event)
-{
-	struct snd_soc_component *cmpnt = snd_soc_dapm_to_component(w->dapm);
-	struct device *dev = cmpnt->dev;
-	struct tegra186_asrc *asrc = dev_get_drvdata(dev);
-	int ret = 0;
-	unsigned int lane_id = 0;
-	lane_id = (w->reg - TEGRA186_ASRC_STREAM1_ENABLE) /
-			TEGRA186_ASRC_STREAM_STRIDE;
 
-	if (event == SND_SOC_DAPM_POST_PMD) {
-		regmap_write(asrc->regmap, ASRC_STREAM_REG
-			(TEGRA186_ASRC_STREAM1_SOFT_RESET, lane_id),
-			0x1);
-		return ret;
-	}
-	if (asrc->lane[lane_id].ratio_source == RATIO_ARAD)
-		tegra186_arad_send_ratio();
-
-	return ret;
-}
-
-static struct snd_soc_dai_ops tegra186_asrc_in_dai_ops = {
+static const struct snd_soc_dai_ops tegra186_asrc_in_dai_ops = {
 	.hw_params	= tegra186_asrc_in_hw_params,
 };
 
-static struct snd_soc_dai_ops tegra186_asrc_out_dai_ops = {
+static const struct snd_soc_dai_ops tegra186_asrc_out_dai_ops = {
 	.hw_params	= tegra186_asrc_out_hw_params,
 };
 
-#define IN_DAI(sname, id, dai_ops)	\
+#define IN_DAI(id)						\
 	{							\
-		.name = #sname #id,					\
+		.name = "ASRC-RX-CIF"#id,			\
 		.playback = {					\
-			.stream_name = #sname #id " Receive",	\
-			.channels_min = 1,			\
-			.channels_max = 12,		\
-			.rates = SNDRV_PCM_RATE_8000_192000,		\
-			.formats = SNDRV_PCM_FMTBIT_S8 |		\
-				SNDRV_PCM_FMTBIT_S16_LE |		\
-				SNDRV_PCM_FMTBIT_S24_LE |		\
-				SNDRV_PCM_FMTBIT_S32_LE,		\
-		},						\
-		.ops = dai_ops,		\
-	}
-
-#define OUT_DAI(sname, id, dai_ops)					\
-	{							\
-		.name = #sname #id,					\
-		.capture = {					\
-			.stream_name = #sname #id " Transmit",	\
+			.stream_name = "RX" #id "-CIF-Playback",\
 			.channels_min = 1,			\
 			.channels_max = 12,			\
-			.rates = SNDRV_PCM_RATE_8000_192000,		\
-			.formats = SNDRV_PCM_FMTBIT_S8 |		\
-				SNDRV_PCM_FMTBIT_S16_LE |		\
-				SNDRV_PCM_FMTBIT_S24_LE |		\
-				SNDRV_PCM_FMTBIT_S32_LE,		\
+			.rates = SNDRV_PCM_RATE_8000_192000,	\
+			.formats = SNDRV_PCM_FMTBIT_S8 |	\
+				SNDRV_PCM_FMTBIT_S16_LE |	\
+				SNDRV_PCM_FMTBIT_S24_LE |	\
+				SNDRV_PCM_FMTBIT_S32_LE,	\
 		},						\
-		.ops = dai_ops,		\
+		.capture = {					\
+			.stream_name = "RX" #id "-CIF-Capture", \
+			.channels_min = 1,			\
+			.channels_max = 12,			\
+			.rates = SNDRV_PCM_RATE_8000_192000,	\
+			.formats = SNDRV_PCM_FMTBIT_S8 |	\
+				SNDRV_PCM_FMTBIT_S16_LE |	\
+				SNDRV_PCM_FMTBIT_S24_LE |	\
+				SNDRV_PCM_FMTBIT_S32_LE,	\
+		},						\
+		.ops = &tegra186_asrc_in_dai_ops,		\
+	}
+
+#define OUT_DAI(id)						\
+	{							\
+		.name = "ASRC-TX-CIF"#id,			\
+		.playback = {					\
+			.stream_name = "TX" #id "-CIF-Playback",\
+			.channels_min = 1,			\
+			.channels_max = 12,			\
+			.rates = SNDRV_PCM_RATE_8000_192000,	\
+			.formats = SNDRV_PCM_FMTBIT_S8 |	\
+				SNDRV_PCM_FMTBIT_S16_LE |	\
+				SNDRV_PCM_FMTBIT_S24_LE |	\
+				SNDRV_PCM_FMTBIT_S32_LE,	\
+		},						\
+		.capture = {					\
+			.stream_name = "TX" #id "-CIF-Capture",	\
+			.channels_min = 1,			\
+			.channels_max = 12,			\
+			.rates = SNDRV_PCM_RATE_8000_192000,	\
+			.formats = SNDRV_PCM_FMTBIT_S8 |	\
+				SNDRV_PCM_FMTBIT_S16_LE |	\
+				SNDRV_PCM_FMTBIT_S24_LE |	\
+				SNDRV_PCM_FMTBIT_S32_LE,	\
+		},						\
+		.ops = &tegra186_asrc_out_dai_ops,		\
 	}
 
 static struct snd_soc_dai_driver tegra186_asrc_dais[] = {
-	IN_DAI(RX, 1, &tegra186_asrc_in_dai_ops),
-	IN_DAI(RX, 2, &tegra186_asrc_in_dai_ops),
-	IN_DAI(RX, 3, &tegra186_asrc_in_dai_ops),
-	IN_DAI(RX, 4, &tegra186_asrc_in_dai_ops),
-	IN_DAI(RX, 5, &tegra186_asrc_in_dai_ops),
-	IN_DAI(RX, 6, &tegra186_asrc_in_dai_ops),
-	IN_DAI(RX, 7, &tegra186_asrc_in_dai_ops),
-	OUT_DAI(TX, 1, &tegra186_asrc_out_dai_ops),
-	OUT_DAI(TX, 2, &tegra186_asrc_out_dai_ops),
-	OUT_DAI(TX, 3, &tegra186_asrc_out_dai_ops),
-	OUT_DAI(TX, 4, &tegra186_asrc_out_dai_ops),
-	OUT_DAI(TX, 5, &tegra186_asrc_out_dai_ops),
-	OUT_DAI(TX, 6, &tegra186_asrc_out_dai_ops),
+	/* ASRC Input */
+	IN_DAI(1),
+	IN_DAI(2),
+	IN_DAI(3),
+	IN_DAI(4),
+	IN_DAI(5),
+	IN_DAI(6),
+	IN_DAI(7),
+	/* ASRC Output */
+	OUT_DAI(1),
+	OUT_DAI(2),
+	OUT_DAI(3),
+	OUT_DAI(4),
+	OUT_DAI(5),
+	OUT_DAI(6),
 };
-
-#define SND_SOC_DAPM_IN(wname, wevent) \
-{	.id = snd_soc_dapm_spk, .name = wname, .kcontrol_news = NULL, \
-	.num_kcontrols = 0, .reg = SND_SOC_NOPM, .event = wevent, \
-	.event_flags = SND_SOC_DAPM_POST_PMU | SND_SOC_DAPM_PRE_PMD}
 
 static const struct snd_soc_dapm_widget tegra186_asrc_widgets[] = {
-	SND_SOC_DAPM_AIF_IN("RX1", NULL, 0, SND_SOC_NOPM,
-				0, 0),
-	SND_SOC_DAPM_AIF_IN("RX2", NULL, 0, SND_SOC_NOPM,
-				0, 0),
-	SND_SOC_DAPM_AIF_IN("RX3", NULL, 0, SND_SOC_NOPM,
-				0, 0),
-	SND_SOC_DAPM_AIF_IN("RX4", NULL, 0, SND_SOC_NOPM,
-				0, 0),
-	SND_SOC_DAPM_AIF_IN("RX5", NULL, 0, SND_SOC_NOPM,
-				0, 0),
-	SND_SOC_DAPM_AIF_IN("RX6", NULL, 0, SND_SOC_NOPM,
-				0, 0),
-	SND_SOC_DAPM_AIF_OUT_E("TX1", NULL, 0, TEGRA186_ASRC_STREAM1_ENABLE,
-				TEGRA186_ASRC_STREAM_EN_SHIFT, 0,
-				tegra186_asrc_req_arad_ratio,
-				SND_SOC_DAPM_POST_PMU | SND_SOC_DAPM_POST_PMD),
-	SND_SOC_DAPM_AIF_OUT_E("TX2", NULL, 0, TEGRA186_ASRC_STREAM2_ENABLE,
-				TEGRA186_ASRC_STREAM_EN_SHIFT, 0,
-				tegra186_asrc_req_arad_ratio,
-				SND_SOC_DAPM_POST_PMU | SND_SOC_DAPM_POST_PMD),
-	SND_SOC_DAPM_AIF_OUT_E("TX3", NULL, 0, TEGRA186_ASRC_STREAM3_ENABLE,
-				TEGRA186_ASRC_STREAM_EN_SHIFT, 0,
-				tegra186_asrc_req_arad_ratio,
-				SND_SOC_DAPM_POST_PMU | SND_SOC_DAPM_POST_PMD),
-	SND_SOC_DAPM_AIF_OUT_E("TX4", NULL, 0, TEGRA186_ASRC_STREAM4_ENABLE,
-				TEGRA186_ASRC_STREAM_EN_SHIFT, 0,
-				tegra186_asrc_req_arad_ratio,
-				SND_SOC_DAPM_POST_PMU | SND_SOC_DAPM_POST_PMD),
-	SND_SOC_DAPM_AIF_OUT_E("TX5", NULL, 0, TEGRA186_ASRC_STREAM5_ENABLE,
-				TEGRA186_ASRC_STREAM_EN_SHIFT, 0,
-				tegra186_asrc_req_arad_ratio,
-				SND_SOC_DAPM_POST_PMU | SND_SOC_DAPM_POST_PMD),
-	SND_SOC_DAPM_AIF_OUT_E("TX6", NULL, 0, TEGRA186_ASRC_STREAM6_ENABLE,
-				TEGRA186_ASRC_STREAM_EN_SHIFT, 0,
-				tegra186_asrc_req_arad_ratio,
-				SND_SOC_DAPM_POST_PMU | SND_SOC_DAPM_POST_PMD),
-	SND_SOC_DAPM_IN("RX7", NULL),
+	SND_SOC_DAPM_AIF_IN("RX1", NULL, 0, SND_SOC_NOPM, 0, 0),
+	SND_SOC_DAPM_AIF_IN("RX2", NULL, 0, SND_SOC_NOPM, 0, 0),
+	SND_SOC_DAPM_AIF_IN("RX3", NULL, 0, SND_SOC_NOPM, 0, 0),
+	SND_SOC_DAPM_AIF_IN("RX4", NULL, 0, SND_SOC_NOPM, 0, 0),
+	SND_SOC_DAPM_AIF_IN("RX5", NULL, 0, SND_SOC_NOPM, 0, 0),
+	SND_SOC_DAPM_AIF_IN("RX6", NULL, 0, SND_SOC_NOPM, 0, 0),
+	SND_SOC_DAPM_AIF_IN("RX7", NULL, 0, SND_SOC_NOPM, 0, 0),
+
+	SND_SOC_DAPM_AIF_OUT_E("TX1", NULL, 0,
+			       ASRC_STREAM_REG(TEGRA186_ASRC_ENABLE, 0),
+			       TEGRA186_ASRC_STREAM_EN_SHIFT, 0,
+			       tegra186_asrc_widget_event,
+			       SND_SOC_DAPM_POST_PMD),
+
+	SND_SOC_DAPM_AIF_OUT_E("TX2", NULL, 0,
+			       ASRC_STREAM_REG(TEGRA186_ASRC_ENABLE, 1),
+			       TEGRA186_ASRC_STREAM_EN_SHIFT, 0,
+			       tegra186_asrc_widget_event,
+			       SND_SOC_DAPM_POST_PMD),
+
+	SND_SOC_DAPM_AIF_OUT_E("TX3", NULL, 0,
+			       ASRC_STREAM_REG(TEGRA186_ASRC_ENABLE, 2),
+			       TEGRA186_ASRC_STREAM_EN_SHIFT, 0,
+			       tegra186_asrc_widget_event,
+			       SND_SOC_DAPM_POST_PMD),
+
+	SND_SOC_DAPM_AIF_OUT_E("TX4", NULL, 0,
+			       ASRC_STREAM_REG(TEGRA186_ASRC_ENABLE, 3),
+			       TEGRA186_ASRC_STREAM_EN_SHIFT, 0,
+			       tegra186_asrc_widget_event,
+			       SND_SOC_DAPM_POST_PMD),
+
+	SND_SOC_DAPM_AIF_OUT_E("TX5", NULL, 0,
+			       ASRC_STREAM_REG(TEGRA186_ASRC_ENABLE, 4),
+			       TEGRA186_ASRC_STREAM_EN_SHIFT, 0,
+			       tegra186_asrc_widget_event,
+			       SND_SOC_DAPM_POST_PMD),
+
+	SND_SOC_DAPM_AIF_OUT_E("TX6", NULL, 0,
+			       ASRC_STREAM_REG(TEGRA186_ASRC_ENABLE, 5),
+			       TEGRA186_ASRC_STREAM_EN_SHIFT, 0,
+			       tegra186_asrc_widget_event,
+			       SND_SOC_DAPM_POST_PMD),
+
+	SND_SOC_DAPM_SPK("Depacketizer", NULL),
 };
 
+#define ASRC_STREAM_ROUTE(id, sname)					   \
+	{ "RX" #id " XBAR-" sname,      NULL,   "RX" #id " XBAR-TX" },	   \
+	{ "RX" #id "-CIF-" sname,       NULL,   "RX" #id " XBAR-" sname }, \
+	{ "RX" #id,                     NULL,   "RX" #id "-CIF-" sname },  \
+	{ "TX" #id,			NULL,   "RX" #id },		   \
+	{ "TX" #id "-CIF-" sname,       NULL,   "TX" #id },		   \
+	{ "TX" #id " XBAR-" sname,      NULL,   "TX" #id "-CIF-" sname },  \
+	{ "TX" #id " XBAR-RX",          NULL,   "TX" #id " XBAR-" sname },
+
+#define ASRC_ROUTE(id)							   \
+	ASRC_STREAM_ROUTE(id, "Playback")				   \
+	ASRC_STREAM_ROUTE(id, "Capture")
+
+#define ASRC_RATIO_ROUTE(sname)						   \
+	{ "RX7 XBAR-" sname,		NULL,	"RX7 XBAR-TX" },	   \
+	{ "RX7-CIF-" sname,		NULL,	"RX7 XBAR-" sname },	   \
+	{ "RX7",			NULL,	"RX7-CIF-" sname },	   \
+	{ "Depacketizer",		NULL,	"RX7" },
+
 static const struct snd_soc_dapm_route tegra186_asrc_routes[] = {
-	{ "RX1",       NULL, "RX1 Receive" },
-	{ "TX1",       NULL, "RX1" },
-	{ "TX1 Transmit", NULL, "TX1" },
-	{ "RX2",       NULL, "RX2 Receive" },
-	{ "TX2",       NULL, "RX2" },
-	{ "TX2 Transmit", NULL, "TX2" },
-	{ "RX3",       NULL, "RX3 Receive" },
-	{ "TX3",       NULL, "RX3" },
-	{ "TX3 Transmit", NULL, "TX3" },
-	{ "RX4",       NULL, "RX4 Receive" },
-	{ "TX4",       NULL, "RX4" },
-	{ "TX4 Transmit", NULL, "TX4" },
-	{ "RX5",       NULL, "RX5 Receive" },
-	{ "TX5",       NULL, "RX5" },
-	{ "TX5 Transmit", NULL, "TX5" },
-	{ "RX6",       NULL, "RX6 Receive" },
-	{ "TX6",       NULL, "RX6" },
-	{ "TX6 Transmit", NULL, "TX6" },
-	{ "RX7",       NULL, "RX7 Receive" },
+	ASRC_ROUTE(1)
+	ASRC_ROUTE(2)
+	ASRC_ROUTE(3)
+	ASRC_ROUTE(4)
+	ASRC_ROUTE(5)
+	ASRC_ROUTE(6)
+	ASRC_RATIO_ROUTE("Playback")
+	ASRC_RATIO_ROUTE("Capture")
 };
 
 static const char * const tegra186_asrc_ratio_source_text[] = {
@@ -695,10 +642,10 @@ static const char * const tegra186_asrc_ratio_source_text[] = {
 	"SW",
 };
 
-#define ASRC_SOURCE_DECL(name, id) \
-	static const struct soc_enum name = \
-		SOC_ENUM_SINGLE(ASRC_STREAM_SOURCE_SELECT(id), \
-			0, 2, tegra186_asrc_ratio_source_text)
+#define ASRC_SOURCE_DECL(name, id)					\
+	static const struct soc_enum name =				\
+		SOC_ENUM_SINGLE(ASRC_STREAM_SOURCE_SELECT(id),		\
+				0, 2, tegra186_asrc_ratio_source_text)
 
 ASRC_SOURCE_DECL(src_select1, 0);
 ASRC_SOURCE_DECL(src_select2, 1);
@@ -707,172 +654,226 @@ ASRC_SOURCE_DECL(src_select4, 3);
 ASRC_SOURCE_DECL(src_select5, 4);
 ASRC_SOURCE_DECL(src_select6, 5);
 
-#define SOC_SINGLE_EXT_FRAC(xname, xregbase, \
-	xmax, xget, xput) \
-{       .iface = SNDRV_CTL_ELEM_IFACE_MIXER, .name = (xname), \
-	.info = snd_soc_info_xr_sx, .get = xget, \
-	.put = xput, \
-	.private_value = (unsigned long)&(struct soc_mreg_control) \
-		{.regbase = xregbase, .regcount = 1, .nbits = 32, \
-		.invert = 0, .min = 0, .max = xmax} }
+#define SOC_SINGLE_EXT_FRAC(xname, xregbase, xmax, xget, xput)		\
+{									\
+	.iface	= SNDRV_CTL_ELEM_IFACE_MIXER,				\
+	.name	= (xname),						\
+	.info	= snd_soc_info_xr_sx,					\
+	.get	= xget,							\
+	.put	= xput,							\
+									\
+	.private_value = (unsigned long)&(struct soc_mreg_control)	\
+	{								\
+		.regbase	= xregbase,				\
+		.regcount	= 1,					\
+		.nbits		= 32,					\
+		.invert		= 0,					\
+		.min		= 0,					\
+		.max		= xmax					\
+	}								\
+}
 
 static const struct snd_kcontrol_new tegra186_asrc_controls[] = {
-	SOC_SINGLE_EXT("Ratio1 Integer Part", TEGRA186_ASRC_STREAM1_RATIO_INTEGER_PART,
-		0, TEGRA186_ASRC_STREAM_RATIO_INTEGER_PART_MASK, 0,
-		tegra186_asrc_get_ratio_int, tegra186_asrc_put_ratio_int),
+	/* Controls for integer part of ratio */
+	SOC_SINGLE_EXT("Ratio1 Integer Part",
+		       ASRC_STREAM_REG(TEGRA186_ASRC_RATIO_INT_PART, 0),
+		       0, TEGRA186_ASRC_STREAM_RATIO_INT_PART_MASK, 0,
+		       tegra186_asrc_get_ratio_int,
+		       tegra186_asrc_put_ratio_int),
+
+	SOC_SINGLE_EXT("Ratio2 Integer Part",
+		       ASRC_STREAM_REG(TEGRA186_ASRC_RATIO_INT_PART, 1),
+		       0, TEGRA186_ASRC_STREAM_RATIO_INT_PART_MASK, 0,
+		       tegra186_asrc_get_ratio_int,
+		       tegra186_asrc_put_ratio_int),
+
+	SOC_SINGLE_EXT("Ratio3 Integer Part",
+		       ASRC_STREAM_REG(TEGRA186_ASRC_RATIO_INT_PART, 2),
+		       0, TEGRA186_ASRC_STREAM_RATIO_INT_PART_MASK, 0,
+		       tegra186_asrc_get_ratio_int,
+		       tegra186_asrc_put_ratio_int),
+
+	SOC_SINGLE_EXT("Ratio4 Integer Part",
+		       ASRC_STREAM_REG(TEGRA186_ASRC_RATIO_INT_PART, 3),
+		       0, TEGRA186_ASRC_STREAM_RATIO_INT_PART_MASK, 0,
+		       tegra186_asrc_get_ratio_int,
+		       tegra186_asrc_put_ratio_int),
+
+	SOC_SINGLE_EXT("Ratio5 Integer Part",
+		       ASRC_STREAM_REG(TEGRA186_ASRC_RATIO_INT_PART, 4),
+		       0, TEGRA186_ASRC_STREAM_RATIO_INT_PART_MASK, 0,
+		       tegra186_asrc_get_ratio_int,
+		       tegra186_asrc_put_ratio_int),
+
+	SOC_SINGLE_EXT("Ratio6 Integer Part",
+		       ASRC_STREAM_REG(TEGRA186_ASRC_RATIO_INT_PART, 5),
+		       0, TEGRA186_ASRC_STREAM_RATIO_INT_PART_MASK, 0,
+		       tegra186_asrc_get_ratio_int,
+		       tegra186_asrc_put_ratio_int),
+
+	/* Controls for fractional part of ratio */
 	SOC_SINGLE_EXT_FRAC("Ratio1 Fractional Part",
-		TEGRA186_ASRC_STREAM1_RATIO_FRAC_PART,
-		TEGRA186_ASRC_STREAM_RATIO_FRAC_PART_MASK,
-		tegra186_asrc_get_ratio_frac, tegra186_asrc_put_ratio_frac),
-	SOC_SINGLE_EXT("Ratio2 Integer Part", TEGRA186_ASRC_STREAM2_RATIO_INTEGER_PART,
-		0, TEGRA186_ASRC_STREAM_RATIO_INTEGER_PART_MASK, 0,
-		tegra186_asrc_get_ratio_int, tegra186_asrc_put_ratio_int),
+			    ASRC_STREAM_REG(TEGRA186_ASRC_RATIO_FRAC_PART, 0),
+			    TEGRA186_ASRC_STREAM_RATIO_FRAC_PART_MASK,
+			    tegra186_asrc_get_ratio_frac,
+			    tegra186_asrc_put_ratio_frac),
+
 	SOC_SINGLE_EXT_FRAC("Ratio2 Fractional Part",
-		TEGRA186_ASRC_STREAM2_RATIO_FRAC_PART,
-		TEGRA186_ASRC_STREAM_RATIO_FRAC_PART_MASK,
-		tegra186_asrc_get_ratio_frac, tegra186_asrc_put_ratio_frac),
-	SOC_SINGLE_EXT("Ratio3 Integer Part", TEGRA186_ASRC_STREAM3_RATIO_INTEGER_PART,
-		0, TEGRA186_ASRC_STREAM_RATIO_INTEGER_PART_MASK, 0,
-		tegra186_asrc_get_ratio_int, tegra186_asrc_put_ratio_int),
+			    ASRC_STREAM_REG(TEGRA186_ASRC_RATIO_FRAC_PART, 1),
+			    TEGRA186_ASRC_STREAM_RATIO_FRAC_PART_MASK,
+			    tegra186_asrc_get_ratio_frac,
+			    tegra186_asrc_put_ratio_frac),
+
 	SOC_SINGLE_EXT_FRAC("Ratio3 Fractional Part",
-		TEGRA186_ASRC_STREAM3_RATIO_FRAC_PART,
-		TEGRA186_ASRC_STREAM_RATIO_FRAC_PART_MASK,
-		tegra186_asrc_get_ratio_frac, tegra186_asrc_put_ratio_frac),
-	SOC_SINGLE_EXT("Ratio4 Integer Part", TEGRA186_ASRC_STREAM4_RATIO_INTEGER_PART,
-		0, TEGRA186_ASRC_STREAM_RATIO_INTEGER_PART_MASK, 0,
-		tegra186_asrc_get_ratio_int, tegra186_asrc_put_ratio_int),
+			    ASRC_STREAM_REG(TEGRA186_ASRC_RATIO_FRAC_PART, 2),
+			    TEGRA186_ASRC_STREAM_RATIO_FRAC_PART_MASK,
+			    tegra186_asrc_get_ratio_frac,
+			    tegra186_asrc_put_ratio_frac),
+
 	SOC_SINGLE_EXT_FRAC("Ratio4 Fractional Part",
-		TEGRA186_ASRC_STREAM4_RATIO_FRAC_PART,
-		TEGRA186_ASRC_STREAM_RATIO_FRAC_PART_MASK,
-		tegra186_asrc_get_ratio_frac, tegra186_asrc_put_ratio_frac),
-	SOC_SINGLE_EXT("Ratio5 Integer Part", TEGRA186_ASRC_STREAM5_RATIO_INTEGER_PART,
-		0, TEGRA186_ASRC_STREAM_RATIO_INTEGER_PART_MASK, 0,
-		tegra186_asrc_get_ratio_int, tegra186_asrc_put_ratio_int),
+			    ASRC_STREAM_REG(TEGRA186_ASRC_RATIO_FRAC_PART, 3),
+			    TEGRA186_ASRC_STREAM_RATIO_FRAC_PART_MASK,
+			    tegra186_asrc_get_ratio_frac,
+			    tegra186_asrc_put_ratio_frac),
+
 	SOC_SINGLE_EXT_FRAC("Ratio5 Fractional Part",
-		TEGRA186_ASRC_STREAM5_RATIO_FRAC_PART,
-		TEGRA186_ASRC_STREAM_RATIO_FRAC_PART_MASK,
-		tegra186_asrc_get_ratio_frac, tegra186_asrc_put_ratio_frac),
-	SOC_SINGLE_EXT("Ratio6 Integer Part", TEGRA186_ASRC_STREAM6_RATIO_INTEGER_PART,
-		0, TEGRA186_ASRC_STREAM_RATIO_INTEGER_PART_MASK, 0,
-		tegra186_asrc_get_ratio_int, tegra186_asrc_put_ratio_int),
+			    ASRC_STREAM_REG(TEGRA186_ASRC_RATIO_FRAC_PART, 4),
+			    TEGRA186_ASRC_STREAM_RATIO_FRAC_PART_MASK,
+			    tegra186_asrc_get_ratio_frac,
+			    tegra186_asrc_put_ratio_frac),
+
 	SOC_SINGLE_EXT_FRAC("Ratio6 Fractional Part",
-		TEGRA186_ASRC_STREAM6_RATIO_FRAC_PART,
-		TEGRA186_ASRC_STREAM_RATIO_FRAC_PART_MASK,
-		tegra186_asrc_get_ratio_frac, tegra186_asrc_put_ratio_frac),
+			    ASRC_STREAM_REG(TEGRA186_ASRC_RATIO_FRAC_PART, 5),
+			    TEGRA186_ASRC_STREAM_RATIO_FRAC_PART_MASK,
+			    tegra186_asrc_get_ratio_frac,
+			    tegra186_asrc_put_ratio_frac),
 
+	/* Source of ratio provider */
 	SOC_ENUM_EXT("Ratio1 Source", src_select1,
-		tegra186_asrc_get_ratio_source, tegra186_asrc_put_ratio_source),
-	SOC_ENUM_EXT("Ratio2 Source", src_select2,
-		tegra186_asrc_get_ratio_source, tegra186_asrc_put_ratio_source),
-	SOC_ENUM_EXT("Ratio3 Source", src_select3,
-		tegra186_asrc_get_ratio_source, tegra186_asrc_put_ratio_source),
-	SOC_ENUM_EXT("Ratio4 Source", src_select4,
-		tegra186_asrc_get_ratio_source, tegra186_asrc_put_ratio_source),
-	SOC_ENUM_EXT("Ratio5 Source", src_select5,
-		tegra186_asrc_get_ratio_source, tegra186_asrc_put_ratio_source),
-	SOC_ENUM_EXT("Ratio6 Source", src_select6,
-		tegra186_asrc_get_ratio_source, tegra186_asrc_put_ratio_source),
+		     tegra186_asrc_get_ratio_source,
+		     tegra186_asrc_put_ratio_source),
 
-	SOC_SINGLE_EXT("Stream1 Enable",
-		TEGRA186_ASRC_STREAM1_ENABLE, 0, 1, 0,
-		tegra186_asrc_get_enable_stream, tegra186_asrc_put_enable_stream),
-	SOC_SINGLE_EXT("Stream2 Enable",
-		TEGRA186_ASRC_STREAM2_ENABLE, 0, 1, 0,
-		tegra186_asrc_get_enable_stream, tegra186_asrc_put_enable_stream),
-	SOC_SINGLE_EXT("Stream3 Enable",
-		TEGRA186_ASRC_STREAM3_ENABLE, 0, 1, 0,
-		tegra186_asrc_get_enable_stream, tegra186_asrc_put_enable_stream),
-	SOC_SINGLE_EXT("Stream4 Enable",
-		TEGRA186_ASRC_STREAM4_ENABLE, 0, 1, 0,
-		tegra186_asrc_get_enable_stream, tegra186_asrc_put_enable_stream),
-	SOC_SINGLE_EXT("Stream5 Enable",
-		TEGRA186_ASRC_STREAM5_ENABLE, 0, 1, 0,
-		tegra186_asrc_get_enable_stream, tegra186_asrc_put_enable_stream),
-	SOC_SINGLE_EXT("Stream6 Enable",
-		TEGRA186_ASRC_STREAM6_ENABLE, 0, 1, 0,
-		tegra186_asrc_get_enable_stream, tegra186_asrc_put_enable_stream),
-	SOC_SINGLE_EXT("Stream1 Hwcomp Disable",
-		TEGRA186_ASRC_STREAM1_CONFIG,
-		0, 1, 0,
-		tegra186_asrc_get_hwcomp_disable, tegra186_asrc_put_hwcomp_disable),
-	SOC_SINGLE_EXT("Stream2 Hwcomp Disable",
-		TEGRA186_ASRC_STREAM2_CONFIG,
-		0, 1, 0,
-		tegra186_asrc_get_hwcomp_disable, tegra186_asrc_put_hwcomp_disable),
-	SOC_SINGLE_EXT("Stream3 Hwcomp Disable",
-		TEGRA186_ASRC_STREAM3_CONFIG,
-		0, 1, 0,
-		tegra186_asrc_get_hwcomp_disable, tegra186_asrc_put_hwcomp_disable),
-	SOC_SINGLE_EXT("Stream4 Hwcomp Disable",
-		TEGRA186_ASRC_STREAM4_CONFIG,
-		0, 1, 0,
-		tegra186_asrc_get_hwcomp_disable, tegra186_asrc_put_hwcomp_disable),
-	SOC_SINGLE_EXT("Stream5 Hwcomp Disable",
-		TEGRA186_ASRC_STREAM5_CONFIG,
-		0, 1, 0,
-		tegra186_asrc_get_hwcomp_disable, tegra186_asrc_put_hwcomp_disable),
-	SOC_SINGLE_EXT("Stream6 Hwcomp Disable",
-		TEGRA186_ASRC_STREAM6_CONFIG,
-		0, 1, 0,
-		tegra186_asrc_get_hwcomp_disable, tegra186_asrc_put_hwcomp_disable),
-	SOC_SINGLE_EXT("Stream1 Input Thresh",
-		TEGRA186_ASRC_STREAM1_RX_THRESHOLD,
-		0, 3, 0,
-		tegra186_asrc_get_input_threshold, tegra186_asrc_put_input_threshold),
-	SOC_SINGLE_EXT("Stream2 Input Thresh",
-		TEGRA186_ASRC_STREAM2_RX_THRESHOLD,
-		0, 3, 0,
-		tegra186_asrc_get_input_threshold, tegra186_asrc_put_input_threshold),
-	SOC_SINGLE_EXT("Stream3 Input Thresh",
-		TEGRA186_ASRC_STREAM3_RX_THRESHOLD,
-		0, 3, 0,
-		tegra186_asrc_get_input_threshold, tegra186_asrc_put_input_threshold),
-	SOC_SINGLE_EXT("Stream4 Input Thresh",
-		TEGRA186_ASRC_STREAM4_RX_THRESHOLD,
-		0, 3, 0,
-		tegra186_asrc_get_input_threshold, tegra186_asrc_put_input_threshold),
-	SOC_SINGLE_EXT("Stream5 Input Thresh",
-		TEGRA186_ASRC_STREAM5_RX_THRESHOLD,
-		0, 3, 0,
-		tegra186_asrc_get_input_threshold, tegra186_asrc_put_input_threshold),
-	SOC_SINGLE_EXT("Stream6 Input Thresh",
-		TEGRA186_ASRC_STREAM6_RX_THRESHOLD,
-		0, 3, 0,
-		tegra186_asrc_get_input_threshold, tegra186_asrc_put_input_threshold),
-	SOC_SINGLE_EXT("Stream1 Output Thresh",
-		TEGRA186_ASRC_STREAM1_TX_THRESHOLD,
-		0, 3, 0,
-		tegra186_asrc_get_output_threshold, tegra186_asrc_put_output_threshold),
-	SOC_SINGLE_EXT("Stream2 Output Thresh",
-		TEGRA186_ASRC_STREAM2_TX_THRESHOLD,
-		0, 3, 0,
-		tegra186_asrc_get_output_threshold, tegra186_asrc_put_output_threshold),
-	SOC_SINGLE_EXT("Stream3 Output Thresh",
-		TEGRA186_ASRC_STREAM3_TX_THRESHOLD,
-		0, 3, 0,
-		tegra186_asrc_get_output_threshold, tegra186_asrc_put_output_threshold),
-	SOC_SINGLE_EXT("Stream4 Output Thresh",
-		TEGRA186_ASRC_STREAM4_TX_THRESHOLD,
-		0, 3, 0,
-		tegra186_asrc_get_output_threshold, tegra186_asrc_put_output_threshold),
-	SOC_SINGLE_EXT("Stream5 Output Thresh",
-		TEGRA186_ASRC_STREAM5_TX_THRESHOLD,
-		0, 3, 0,
-		tegra186_asrc_get_output_threshold, tegra186_asrc_put_output_threshold),
-	SOC_SINGLE_EXT("Stream6 Output Thresh",
-		TEGRA186_ASRC_STREAM6_TX_THRESHOLD,
-		0, 3, 0,
-		tegra186_asrc_get_output_threshold, tegra186_asrc_put_output_threshold),
+	SOC_ENUM_EXT("Ratio2 Source", src_select2,
+		     tegra186_asrc_get_ratio_source,
+		     tegra186_asrc_put_ratio_source),
+
+	SOC_ENUM_EXT("Ratio3 Source", src_select3,
+		     tegra186_asrc_get_ratio_source,
+		     tegra186_asrc_put_ratio_source),
+
+	SOC_ENUM_EXT("Ratio4 Source", src_select4,
+		     tegra186_asrc_get_ratio_source,
+		     tegra186_asrc_put_ratio_source),
+
+	SOC_ENUM_EXT("Ratio5 Source", src_select5,
+		     tegra186_asrc_get_ratio_source,
+		     tegra186_asrc_put_ratio_source),
+
+	SOC_ENUM_EXT("Ratio6 Source", src_select6,
+		     tegra186_asrc_get_ratio_source,
+		     tegra186_asrc_put_ratio_source),
+
+	/* Disable HW managed overflow/underflow issue at input and output */
+	SOC_SINGLE_EXT("Stream1 HW Component Disable",
+		       ASRC_STREAM_REG(TEGRA186_ASRC_CFG, 0), 0, 1, 0,
+		       tegra186_asrc_get_hwcomp_disable,
+		       tegra186_asrc_put_hwcomp_disable),
+
+	SOC_SINGLE_EXT("Stream2 HW Component Disable",
+		       ASRC_STREAM_REG(TEGRA186_ASRC_CFG, 1), 0, 1, 0,
+		       tegra186_asrc_get_hwcomp_disable,
+		       tegra186_asrc_put_hwcomp_disable),
+
+	SOC_SINGLE_EXT("Stream3 HW Component Disable",
+		       ASRC_STREAM_REG(TEGRA186_ASRC_CFG, 2), 0, 1, 0,
+		       tegra186_asrc_get_hwcomp_disable,
+		       tegra186_asrc_put_hwcomp_disable),
+
+	SOC_SINGLE_EXT("Stream4 HW Component Disable",
+		       ASRC_STREAM_REG(TEGRA186_ASRC_CFG, 3), 0, 1, 0,
+		       tegra186_asrc_get_hwcomp_disable,
+		       tegra186_asrc_put_hwcomp_disable),
+
+	SOC_SINGLE_EXT("Stream5 HW Component Disable",
+		       ASRC_STREAM_REG(TEGRA186_ASRC_CFG, 4), 0, 1, 0,
+		       tegra186_asrc_get_hwcomp_disable,
+		       tegra186_asrc_put_hwcomp_disable),
+
+	SOC_SINGLE_EXT("Stream6 HW Component Disable",
+		       ASRC_STREAM_REG(TEGRA186_ASRC_CFG, 5), 0, 1, 0,
+		       tegra186_asrc_get_hwcomp_disable,
+		       tegra186_asrc_put_hwcomp_disable),
+
+	/* Input threshold for watermark fields */
+	SOC_SINGLE_EXT("Stream1 Input Threshold",
+		       ASRC_STREAM_REG(TEGRA186_ASRC_RX_THRESHOLD, 0), 0, 3, 0,
+		       tegra186_asrc_get_input_threshold,
+		       tegra186_asrc_put_input_threshold),
+
+	SOC_SINGLE_EXT("Stream2 Input Threshold",
+		       ASRC_STREAM_REG(TEGRA186_ASRC_RX_THRESHOLD, 1), 0, 3, 0,
+		       tegra186_asrc_get_input_threshold,
+		       tegra186_asrc_put_input_threshold),
+
+	SOC_SINGLE_EXT("Stream3 Input Threshold",
+		       ASRC_STREAM_REG(TEGRA186_ASRC_RX_THRESHOLD, 2), 0, 3, 0,
+		       tegra186_asrc_get_input_threshold,
+		       tegra186_asrc_put_input_threshold),
+
+	SOC_SINGLE_EXT("Stream4 Input Threshold",
+		       ASRC_STREAM_REG(TEGRA186_ASRC_RX_THRESHOLD, 3), 0, 3, 0,
+		       tegra186_asrc_get_input_threshold,
+		       tegra186_asrc_put_input_threshold),
+
+	SOC_SINGLE_EXT("Stream5 Input Threshold",
+		       ASRC_STREAM_REG(TEGRA186_ASRC_RX_THRESHOLD, 4), 0, 3, 0,
+		       tegra186_asrc_get_input_threshold,
+		       tegra186_asrc_put_input_threshold),
+
+	SOC_SINGLE_EXT("Stream6 Input Threshold",
+		       ASRC_STREAM_REG(TEGRA186_ASRC_RX_THRESHOLD, 4), 0, 3, 0,
+		       tegra186_asrc_get_input_threshold,
+		       tegra186_asrc_put_input_threshold),
+
+	/* Output threshold for watermark fields */
+	SOC_SINGLE_EXT("Stream1 Output Threshold",
+		       ASRC_STREAM_REG(TEGRA186_ASRC_TX_THRESHOLD, 0), 0, 3, 0,
+		       tegra186_asrc_get_output_threshold,
+		       tegra186_asrc_put_output_threshold),
+
+	SOC_SINGLE_EXT("Stream2 Output Threshold",
+		       ASRC_STREAM_REG(TEGRA186_ASRC_TX_THRESHOLD, 1), 0, 3, 0,
+		       tegra186_asrc_get_output_threshold,
+		       tegra186_asrc_put_output_threshold),
+
+	SOC_SINGLE_EXT("Stream3 Output Threshold",
+		       ASRC_STREAM_REG(TEGRA186_ASRC_TX_THRESHOLD, 2), 0, 3, 0,
+		       tegra186_asrc_get_output_threshold,
+		       tegra186_asrc_put_output_threshold),
+
+	SOC_SINGLE_EXT("Stream4 Output Threshold",
+		       ASRC_STREAM_REG(TEGRA186_ASRC_TX_THRESHOLD, 3), 0, 3, 0,
+		       tegra186_asrc_get_output_threshold,
+		       tegra186_asrc_put_output_threshold),
+
+	SOC_SINGLE_EXT("Stream5 Output Threshold",
+		       ASRC_STREAM_REG(TEGRA186_ASRC_TX_THRESHOLD, 4), 0, 3, 0,
+		       tegra186_asrc_get_output_threshold,
+		       tegra186_asrc_put_output_threshold),
+
+	SOC_SINGLE_EXT("Stream6 Output Threshold",
+		       ASRC_STREAM_REG(TEGRA186_ASRC_TX_THRESHOLD, 5), 0, 3, 0,
+		       tegra186_asrc_get_output_threshold,
+		       tegra186_asrc_put_output_threshold),
 };
 
-static struct snd_soc_component_driver tegra186_asrc_cmpnt = {
-	.dapm_widgets = tegra186_asrc_widgets,
-	.num_dapm_widgets = ARRAY_SIZE(tegra186_asrc_widgets),
-	.dapm_routes = tegra186_asrc_routes,
-	.num_dapm_routes = ARRAY_SIZE(tegra186_asrc_routes),
-	.controls = tegra186_asrc_controls,
-	.num_controls = ARRAY_SIZE(tegra186_asrc_controls),
-	.non_legacy_dai_naming	= 1,
+static const struct snd_soc_component_driver tegra186_asrc_cmpnt = {
+	.dapm_widgets		= tegra186_asrc_widgets,
+	.num_dapm_widgets	= ARRAY_SIZE(tegra186_asrc_widgets),
+	.dapm_routes		= tegra186_asrc_routes,
+	.num_dapm_routes	= ARRAY_SIZE(tegra186_asrc_routes),
+	.controls		= tegra186_asrc_controls,
+	.num_controls		= ARRAY_SIZE(tegra186_asrc_controls),
 };
 
 static bool tegra186_asrc_wr_reg(struct device *dev, unsigned int reg)
@@ -881,43 +882,14 @@ static bool tegra186_asrc_wr_reg(struct device *dev, unsigned int reg)
 		reg %= TEGRA186_ASRC_STREAM_STRIDE;
 
 	switch (reg) {
-	case TEGRA186_ASRC_STREAM1_CONFIG:
-	case TEGRA186_ASRC_STREAM1_RATIO_INTEGER_PART:
-	case TEGRA186_ASRC_STREAM1_RATIO_FRAC_PART:
-	case TEGRA186_ASRC_STREAM1_RX_THRESHOLD:
-	case TEGRA186_ASRC_STREAM1_TX_THRESHOLD:
-	case TEGRA186_ASRC_STREAM1_RATIO_LOCK_STATUS:
-	case TEGRA186_ASRC_STREAM1_MUTE_UNMUTE_DURATION:
-	case TEGRA186_ASRC_STREAM1_RATIO_COMP:
-	case TEGRA186_ASRC_STREAM1_RX_CIF_CTRL:
-	case TEGRA186_ASRC_STREAM1_TX_CIF_CTRL:
-	case TEGRA186_ASRC_STREAM1_ENABLE:
-	case TEGRA186_ASRC_STREAM1_SOFT_RESET:
-	case TEGRA186_ASRC_STREAM1_STATEBUF_ADDR:
-	case TEGRA186_ASRC_STREAM1_STATEBUF_CONFIG:
-	case TEGRA186_ASRC_STREAM1_INSAMPLEBUF_ADDR:
-	case TEGRA186_ASRC_STREAM1_INSAMPLEBUF_CONFIG:
-	case TEGRA186_ASRC_STREAM1_OUTSAMPLEBUF_ADDR:
-	case TEGRA186_ASRC_STREAM1_OUTSAMPLEBUF_CONFIG:
-
-	case TEGRA186_ASRC_RATIO_UPD_RX_CIF_CTRL:
-
-	case TEGRA186_ASRC_GLOBAL_ENB:
-	case TEGRA186_ASRC_GLOBAL_SOFT_RESET:
-	case TEGRA186_ASRC_GLOBAL_CG:
-	case TEGRA186_ASRC_GLOBAL_SCRATCH_ADDR:
-	case TEGRA186_ASRC_GLOBAL_SCRATCH_CONFIG:
-
-	case TEGRA186_ASRC_GLOBAL_INT_MASK:
-	case TEGRA186_ASRC_GLOBAL_INT_SET:
-	case TEGRA186_ASRC_GLOBAL_INT_CLEAR:
-	case TEGRA186_ASRC_GLOBAL_APR_CTRL:
-	case TEGRA186_ASRC_GLOBAL_APR_CTRL_ACCESS_CTRL:
-	case TEGRA186_ASRC_GLOBAL_DISARM_APR:
-	case TEGRA186_ASRC_GLOBAL_DISARM_APR_ACCESS_CTRL:
-	case TEGRA186_ASRC_GLOBAL_RATIO_WR_ACCESS:
-	case TEGRA186_ASRC_GLOBAL_RATIO_WR_ACCESS_CTRL:
-	case TEGRA186_ASRC_CYA:
+	case TEGRA186_ASRC_CFG ... TEGRA186_ASRC_RATIO_COMP:
+	case TEGRA186_ASRC_RX_CIF_CTRL:
+	case TEGRA186_ASRC_TX_CIF_CTRL:
+	case TEGRA186_ASRC_ENABLE:
+	case TEGRA186_ASRC_SOFT_RESET:
+	case TEGRA186_ASRC_GLOBAL_ENB ... TEGRA186_ASRC_RATIO_UPD_RX_CIF_CTRL:
+	case TEGRA186_ASRC_GLOBAL_INT_MASK ... TEGRA186_ASRC_GLOBAL_INT_CLEAR:
+	case TEGRA186_ASRC_GLOBAL_APR_CTRL ... TEGRA186_ASRC_CYA:
 		return true;
 	default:
 		return false;
@@ -929,54 +901,16 @@ static bool tegra186_asrc_rd_reg(struct device *dev, unsigned int reg)
 	if (reg < TEGRA186_ASRC_STREAM_LIMIT)
 		reg %= TEGRA186_ASRC_STREAM_STRIDE;
 
+	if (tegra186_asrc_wr_reg(dev, reg))
+		return true;
+
 	switch (reg) {
-	case TEGRA186_ASRC_STREAM1_CONFIG:
-	case TEGRA186_ASRC_STREAM1_RATIO_INTEGER_PART:
-	case TEGRA186_ASRC_STREAM1_RATIO_FRAC_PART:
-	case TEGRA186_ASRC_STREAM1_RX_THRESHOLD:
-	case TEGRA186_ASRC_STREAM1_TX_THRESHOLD:
-	case TEGRA186_ASRC_STREAM1_RATIO_LOCK_STATUS:
-	case TEGRA186_ASRC_STREAM1_MUTE_UNMUTE_DURATION:
-	case TEGRA186_ASRC_STREAM1_RATIO_COMP:
-	case TEGRA186_ASRC_STREAM1_RX_STATUS:
-	case TEGRA186_ASRC_STREAM1_RX_CIF_CTRL:
-	case TEGRA186_ASRC_STREAM1_TX_STATUS:
-	case TEGRA186_ASRC_STREAM1_TX_CIF_CTRL:
-	case TEGRA186_ASRC_STREAM1_ENABLE:
-	case TEGRA186_ASRC_STREAM1_SOFT_RESET:
-	case TEGRA186_ASRC_STREAM1_STATUS:
-	case TEGRA186_ASRC_STREAM1_BUFFER_STATUS:
-	case TEGRA186_ASRC_STREAM1_CONFIG_ERR_TYPE:
-	case TEGRA186_ASRC_STREAM1_STATEBUF_ADDR:
-	case TEGRA186_ASRC_STREAM1_STATEBUF_CONFIG:
-	case TEGRA186_ASRC_STREAM1_INSAMPLEBUF_ADDR:
-	case TEGRA186_ASRC_STREAM1_INSAMPLEBUF_CONFIG:
-	case TEGRA186_ASRC_STREAM1_OUTSAMPLEBUF_ADDR:
-	case TEGRA186_ASRC_STREAM1_OUTSAMPLEBUF_CONFIG:
-
-	case TEGRA186_ASRC_RATIO_UPD_RX_CIF_CTRL:
+	case TEGRA186_ASRC_RX_STATUS:
+	case TEGRA186_ASRC_TX_STATUS:
+	case TEGRA186_ASRC_STATUS ... TEGRA186_ASRC_OUTSAMPLEBUF_CFG:
 	case TEGRA186_ASRC_RATIO_UPD_RX_STATUS:
-
-	case TEGRA186_ASRC_GLOBAL_ENB:
-	case TEGRA186_ASRC_GLOBAL_SOFT_RESET:
-	case TEGRA186_ASRC_GLOBAL_CG:
-	case TEGRA186_ASRC_GLOBAL_SCRATCH_ADDR:
-	case TEGRA186_ASRC_GLOBAL_SCRATCH_CONFIG:
-
-	case TEGRA186_ASRC_GLOBAL_STATUS:
-	case TEGRA186_ASRC_GLOBAL_STREAM_ENABLE_STATUS:
-	case TEGRA186_ASRC_GLOBAL_INT_STATUS:
-	case TEGRA186_ASRC_GLOBAL_INT_MASK:
-	case TEGRA186_ASRC_GLOBAL_INT_SET:
-	case TEGRA186_ASRC_GLOBAL_INT_CLEAR:
+	case TEGRA186_ASRC_GLOBAL_STATUS ... TEGRA186_ASRC_GLOBAL_INT_STATUS:
 	case TEGRA186_ASRC_GLOBAL_TRANSFER_ERROR_LOG:
-	case TEGRA186_ASRC_GLOBAL_APR_CTRL:
-	case TEGRA186_ASRC_GLOBAL_APR_CTRL_ACCESS_CTRL:
-	case TEGRA186_ASRC_GLOBAL_DISARM_APR:
-	case TEGRA186_ASRC_GLOBAL_DISARM_APR_ACCESS_CTRL:
-	case TEGRA186_ASRC_GLOBAL_RATIO_WR_ACCESS:
-	case TEGRA186_ASRC_GLOBAL_RATIO_WR_ACCESS_CTRL:
-	case TEGRA186_ASRC_CYA:
 		return true;
 	default:
 		return false;
@@ -989,15 +923,13 @@ static bool tegra186_asrc_volatile_reg(struct device *dev, unsigned int reg)
 		reg %= TEGRA186_ASRC_STREAM_STRIDE;
 
 	switch (reg) {
-	case TEGRA186_ASRC_STREAM1_RX_STATUS:
-	case TEGRA186_ASRC_STREAM1_TX_STATUS:
-	case TEGRA186_ASRC_STREAM1_SOFT_RESET:
-	case TEGRA186_ASRC_STREAM1_RATIO_INTEGER_PART:
-	case TEGRA186_ASRC_STREAM1_RATIO_FRAC_PART:
-	case TEGRA186_ASRC_STREAM1_STATUS:
-	case TEGRA186_ASRC_STREAM1_BUFFER_STATUS:
-	case TEGRA186_ASRC_STREAM1_CONFIG_ERR_TYPE:
-	case TEGRA186_ASRC_STREAM1_RATIO_LOCK_STATUS:
+	case TEGRA186_ASRC_RX_STATUS:
+	case TEGRA186_ASRC_TX_STATUS:
+	case TEGRA186_ASRC_SOFT_RESET:
+	case TEGRA186_ASRC_RATIO_INT_PART:
+	case TEGRA186_ASRC_RATIO_FRAC_PART:
+	case TEGRA186_ASRC_STATUS:
+	case TEGRA186_ASRC_RATIO_LOCK_STATUS:
 	case TEGRA186_ASRC_RATIO_UPD_RX_STATUS:
 	case TEGRA186_ASRC_GLOBAL_SOFT_RESET:
 	case TEGRA186_ASRC_GLOBAL_STATUS:
@@ -1010,60 +942,21 @@ static bool tegra186_asrc_volatile_reg(struct device *dev, unsigned int reg)
 	}
 }
 
-void tegra186_asrc_handle_arad_unlock(int stream_id, int action)
-{
-	struct tegra186_asrc *asrc = dev_get_drvdata(asrc_dev);
-	int dcnt = 10;
-
-	regmap_write(asrc->regmap, ASRC_STREAM_REG
-			(TEGRA186_ASRC_STREAM1_ENABLE, stream_id), action);
-	if (!action)
-		udelay(2000);
-
-	while ((tegra186_asrc_get_stream_enable_status(asrc,
-					stream_id) != action) && dcnt--)
-		udelay(100);
-}
-
 static const struct regmap_config tegra186_asrc_regmap_config = {
-	.reg_bits = 32,
-	.reg_stride = 4,
-	.val_bits = 32,
-	.max_register = TEGRA186_ASRC_CYA,
-	.writeable_reg = tegra186_asrc_wr_reg,
-	.readable_reg = tegra186_asrc_rd_reg,
-	.volatile_reg = tegra186_asrc_volatile_reg,
-	.reg_defaults = tegra186_asrc_reg_defaults,
-	.num_reg_defaults = ARRAY_SIZE(tegra186_asrc_reg_defaults),
-	.cache_type = REGCACHE_FLAT,
+	.reg_bits		= 32,
+	.reg_stride		= 4,
+	.val_bits		= 32,
+	.max_register		= TEGRA186_ASRC_CYA,
+	.writeable_reg		= tegra186_asrc_wr_reg,
+	.readable_reg		= tegra186_asrc_rd_reg,
+	.volatile_reg		= tegra186_asrc_volatile_reg,
+	.reg_defaults		= tegra186_asrc_reg_defaults,
+	.num_reg_defaults	= ARRAY_SIZE(tegra186_asrc_reg_defaults),
+	.cache_type		= REGCACHE_FLAT,
 };
-
-#ifdef CONFIG_TEGRA186_AHC
-static void tegra186_asrc_ahc_cb(void *data)
-{
-	struct device *dev = (struct device *)data;
-	struct tegra186_asrc *asrc = dev_get_drvdata(dev);
-
-	regcache_cache_bypass(asrc->regmap, true);
-	regmap_write(asrc->regmap, TEGRA186_ASRC_GLOBAL_INT_CLEAR, 0x1);
-
-	/**
-	 * Hw Bug:200208400 - asrc interrupt status gets cleared when
-	 * it is cleared twice. This WAR is only applicable for T186
-	 */
-	if (of_machine_is_compatible("nvidia,tegra186-asrc"))
-		regmap_write(asrc->regmap, TEGRA186_ASRC_GLOBAL_INT_CLEAR, 0x1);
-
-	regmap_write(asrc->regmap, TEGRA186_ASRC_GLOBAL_ENB, 0x0);
-	udelay(100);
-	regmap_write(asrc->regmap, TEGRA186_ASRC_GLOBAL_ENB, 0x1);
-	regcache_cache_bypass(asrc->regmap, false);
-}
-#endif
 
 static const struct of_device_id tegra186_asrc_of_match[] = {
 	{ .compatible = "nvidia,tegra186-asrc" },
-	{ .compatible = "nvidia,tegra194-asrc" },
 	{},
 };
 MODULE_DEVICE_TABLE(of, tegra186_asrc_of_match);
@@ -1073,10 +966,8 @@ static int tegra186_asrc_platform_probe(struct platform_device *pdev)
 	struct device *dev = &pdev->dev;
 	struct tegra186_asrc *asrc;
 	void __iomem *regs;
-	int err;
 	unsigned int i;
-
-	asrc_dev = dev;
+	int err;
 
 	asrc = devm_kzalloc(dev, sizeof(*asrc), GFP_KERNEL);
 	if (!asrc)
@@ -1097,26 +988,19 @@ static int tegra186_asrc_platform_probe(struct platform_device *pdev)
 
 	regcache_cache_only(asrc->regmap, true);
 
-#ifdef CONFIG_TEGRA186_AHC
-	tegra186_ahc_register_cb(tegra186_asrc_ahc_cb, TEGRA186_AHC_ASRC1_CB,
-				 dev);
-#endif
+	regmap_write(asrc->regmap, TEGRA186_ASRC_GLOBAL_CFG,
+		     TEGRA186_ASRC_GLOBAL_CFG_FRAC_32BIT_PRECISION);
 
-	regmap_write(asrc->regmap, TEGRA186_ASRC_GLOBAL_CONFIG,
-		     TEGRA186_ASRC_GLOBAL_CONFIG_FRAC_32BIT_PRECISION);
-
-	/* initialize default output srate */
-	for (i = 0; i < 6; i++) {
+	/* Initialize default output srate */
+	for (i = 0; i < TEGRA186_ASRC_STREAM_MAX; i++) {
+		asrc->lane[i].ratio_source = TEGRA186_ASRC_RATIO_SOURCE_SW;
 		asrc->lane[i].int_part = 1;
 		asrc->lane[i].frac_part = 0;
-		asrc->lane[i].ratio_source = RATIO_SW;
 		asrc->lane[i].hwcomp_disable = 0;
 		asrc->lane[i].input_thresh =
-			TEGRA186_ASRC_STREAM_DEFAULT_INPUT_HW_COMP_THRESH_CONFIG;
+			TEGRA186_ASRC_STREAM_DEFAULT_INPUT_HW_COMP_THRESH_CFG;
 		asrc->lane[i].output_thresh =
-			TEGRA186_ASRC_STREAM_DEFAULT_OUTPUT_HW_COMP_THRESH_CONFIG;
-		regmap_update_bits(asrc->regmap,
-			ASRC_STREAM_REG(TEGRA186_ASRC_STREAM1_CONFIG, i), 1, 1);
+			TEGRA186_ASRC_STREAM_DEFAULT_OUTPUT_HW_COMP_THRESH_CFG;
 	}
 
 	err = devm_snd_soc_register_component(dev, &tegra186_asrc_cmpnt,

@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-only
 /*
- * Copyright (C) 2016-2020 NVIDIA CORPORATION, All Rights Reserved.
+ * Copyright (C) 2016-2022 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  */
 #include <linux/module.h>
 #include <linux/clk.h>
@@ -78,10 +78,8 @@ static int gic_runtime_resume(struct device *dev)
 	int ret;
 
 	ret = clk_bulk_prepare_enable(data->num_clocks, chip_pm->clks);
-	if (ret) {
-		dev_err(dev, "clk_enable failed: %d\n", ret);
+	if (ret)
 		return ret;
-	}
 
 	/*
 	 * On the very first resume, the pointer to chip_pm->chip_data
@@ -155,7 +153,7 @@ static int gic_probe(struct platform_device *pdev)
 
 	pm_runtime_enable(dev);
 
-	ret = pm_runtime_get_sync(dev);
+	ret = pm_runtime_resume_and_get(dev);
 	if (ret < 0)
 		goto rpm_disable;
 

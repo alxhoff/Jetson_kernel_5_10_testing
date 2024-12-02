@@ -464,13 +464,13 @@ static int uio_open(struct inode *inode, struct file *filep)
 
 	mutex_lock(&minor_lock);
 	idev = idr_find(&uio_idr, iminor(inode));
-	mutex_unlock(&minor_lock);
 	if (!idev) {
 		ret = -ENODEV;
+		mutex_unlock(&minor_lock);
 		goto out;
 	}
-
 	get_device(&idev->dev);
+	mutex_unlock(&minor_lock);
 
 	if (!try_module_get(idev->owner)) {
 		ret = -ENODEV;
@@ -906,7 +906,7 @@ static void uio_device_release(struct device *dev)
 }
 
 /**
- * uio_register_device - register a new userspace IO device
+ * __uio_register_device - register a new userspace IO device
  * @owner:	module that creates the new device
  * @parent:	parent device
  * @info:	UIO device capabilities
@@ -1002,7 +1002,7 @@ static void devm_uio_unregister_device(struct device *dev, void *res)
 }
 
 /**
- * devm_uio_register_device - Resource managed uio_register_device()
+ * __devm_uio_register_device - Resource managed uio_register_device()
  * @owner:	module that creates the new device
  * @parent:	parent device
  * @info:	UIO device capabilities
@@ -1062,9 +1062,8 @@ void uio_unregister_device(struct uio_info *info)
 	wake_up_interruptible(&idev->wait);
 	kill_fasync(&idev->async_queue, SIGIO, POLL_HUP);
 
-	device_unregister(&idev->dev);
-
 	uio_free_minor(minor);
+	device_unregister(&idev->dev);
 
 	return;
 }

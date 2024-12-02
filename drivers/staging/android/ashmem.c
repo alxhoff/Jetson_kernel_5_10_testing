@@ -19,6 +19,7 @@
 #include <linux/security.h>
 #include <linux/mm.h>
 #include <linux/mman.h>
+#include <linux/module.h>
 #include <linux/uaccess.h>
 #include <linux/personality.h>
 #include <linux/bitops.h>
@@ -179,6 +180,7 @@ static inline void lru_del(struct ashmem_range *range)
  * @purged:	   Initial purge status (ASMEM_NOT_PURGED or ASHMEM_WAS_PURGED)
  * @start:	   The starting page (inclusive)
  * @end:	   The ending page (inclusive)
+ * @new_range:	   The placeholder for the new range
  *
  * This function is protected by ashmem_mutex.
  */
@@ -450,9 +452,9 @@ static int ashmem_mmap(struct file *file, struct vm_area_struct *vma)
 		vma_set_anonymous(vma);
 	}
 
-	if (vma->vm_file)
-		fput(vma->vm_file);
-	vma->vm_file = asma->file;
+	vma_set_file(vma, asma->file);
+	/* XXX: merge this with the get_file() above if possible */
+	fput(asma->file);
 
 out:
 	mutex_unlock(&ashmem_mutex);
@@ -894,6 +896,8 @@ static void ashmem_show_fdinfo(struct seq_file *m, struct file *file)
 		seq_printf(m, "name:\t%s\n",
 			   asma->name + ASHMEM_NAME_PREFIX_LEN);
 
+	seq_printf(m, "size:\t%zu\n", asma->size);
+
 	mutex_unlock(&ashmem_mutex);
 }
 #endif
@@ -933,7 +937,7 @@ static int __init ashmem_init(void)
 
 	ashmem_range_cachep = kmem_cache_create("ashmem_range_cache",
 						sizeof(struct ashmem_range),
-						0, 0, NULL);
+						0, SLAB_RECLAIM_ACCOUNT, NULL);
 	if (!ashmem_range_cachep) {
 		pr_err("failed to create slab cache\n");
 		goto out_free1;
@@ -964,4 +968,18 @@ out_free1:
 out:
 	return ret;
 }
-device_initcall(ashmem_init);
+
+static void __exit ashmem_exit(void)
+{
+	misc_deregister(&ashmem_misc);
+	unregister_shrinker(&ashmem_shrinker);
+	kmem_cache_destroy(ashmem_range_cachep);
+	kmem_cache_destroy(ashmem_area_cachep);
+}
+
+module_init(ashmem_init);
+module_exit(ashmem_exit);
+
+MODULE_AUTHOR("Google, Inc.");
+MODULE_DESCRIPTION("Driver for Android shared memory device");
+MODULE_LICENSE("GPL v2");

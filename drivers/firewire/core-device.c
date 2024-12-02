@@ -187,12 +187,12 @@ static int fw_unit_probe(struct device *dev)
 	return driver->probe(fw_unit(dev), unit_match(dev, dev->driver));
 }
 
-static int fw_unit_remove(struct device *dev)
+static void fw_unit_remove(struct device *dev)
 {
 	struct fw_driver *driver =
 			container_of(dev->driver, struct fw_driver, driver);
 
-	return driver->remove(fw_unit(dev)), 0;
+	driver->remove(fw_unit(dev));
 }
 
 static int get_modalias(struct fw_unit *unit, char *buffer, size_t buffer_size)
@@ -719,14 +719,11 @@ static void create_units(struct fw_device *device)
 					fw_unit_attributes,
 					&unit->attribute_group);
 
-		if (device_register(&unit->device) < 0)
-			goto skip_unit;
-
 		fw_device_get(device);
-		continue;
-
-	skip_unit:
-		kfree(unit);
+		if (device_register(&unit->device) < 0) {
+			put_device(&unit->device);
+			continue;
+		}
 	}
 }
 

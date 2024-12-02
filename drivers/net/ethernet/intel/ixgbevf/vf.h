@@ -16,9 +16,6 @@
 
 struct ixgbe_hw;
 
-/* iterator type for walking multicast address lists */
-typedef u8* (*ixgbe_mc_addr_itr) (struct ixgbe_hw *hw, u8 **mc_addr_ptr,
-				  u32 *vmdq);
 struct ixgbe_mac_operations {
 	s32 (*init_hw)(struct ixgbe_hw *);
 	s32 (*reset_hw)(struct ixgbe_hw *);
@@ -42,6 +39,7 @@ struct ixgbe_mac_operations {
 	s32 (*init_rx_addrs)(struct ixgbe_hw *);
 	s32 (*update_mc_addr_list)(struct ixgbe_hw *, struct net_device *);
 	s32 (*update_xcast_mode)(struct ixgbe_hw *, int);
+	s32 (*get_link_state)(struct ixgbe_hw *hw, bool *link_state);
 	s32 (*enable_mc)(struct ixgbe_hw *);
 	s32 (*disable_mc)(struct ixgbe_hw *);
 	s32 (*clear_vfta)(struct ixgbe_hw *);

@@ -18,8 +18,6 @@
  * struct adc_jack_cond - condition to use an extcon state
  *			denotes the last adc_jack_cond element among the array)
  * @id:			the unique id of each external connector
- * @state:		the corresponding extcon state (if 0, this struct
- *			denotes the last adc_jack_cond element among the array)
  * @min_adc:		min adc value for this condition
  * @max_adc:		max adc value for this condition
  *
@@ -32,9 +30,8 @@
  */
 struct adc_jack_cond {
 	unsigned int id;
-	u32 state;	/* extcon state value. 0 if invalid */
-	int min_adc;
-	int max_adc;
+	u32 min_adc;
+	u32 max_adc;
 };
 
 /**
@@ -58,7 +55,7 @@ struct adc_jack_pdata {
 	const char *name;
 	const char *consumer_channel;
 
-	unsigned int *cable_names;
+	const unsigned int *cable_names;
 
 	/* The last entry's state should be 0 */
 	struct adc_jack_cond *adc_conditions;
@@ -66,7 +63,6 @@ struct adc_jack_pdata {
 	unsigned long irq_flags;
 	unsigned long handling_delay_ms; /* in ms */
 	bool wakeup_source;
-	int debounce_ms;
 };
 
 #endif /* _EXTCON_ADC_JACK_H */

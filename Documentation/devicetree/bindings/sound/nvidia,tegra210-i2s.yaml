@@ -15,7 +15,6 @@ description: |
 maintainers:
   - Jon Hunter <jonathanh@nvidia.com>
   - Sameer Pujar <spujar@nvidia.com>
-  - Mohan Kumar D <mkumard@nvidia.com>
 
 properties:
   $nodename:
@@ -35,7 +34,6 @@ properties:
 
   clocks:
     minItems: 1
-    maxItems: 2
     items:
       - description: I2S bit clock
       - description:
@@ -49,7 +47,6 @@ properties:
 
   clock-names:
     minItems: 1
-    maxItems: 2
     items:
       - const: i2s
       - const: sync_input
@@ -75,20 +72,22 @@ properties:
       The name can be "I2S1" or "I2S2" ... "I2Sx", where x depends
       on the maximum available instances on a Tegra SoC.
 
-  "#sound-dai-cells":
-    description: The cell specifies number of DAIs.
-    const: 1
+  ports:
+    $ref: /schemas/graph.yaml#/properties/ports
+    properties:
+      port@0:
+        $ref: audio-graph-port.yaml#
+        unevaluatedProperties: false
+        description: |
+          I2S ACIF (Audio Client Interface) port connected to the
+          corresponding AHUB (Audio Hub) ACIF port.
 
-  nvidia,ahub-i2s-id:
-    description: Must be specified with I2S instance number.
-
-  fsync-width:
-    description: Frame sync width in terms of bit clocks for I2S FSYNC mode.
-      If not specified default value of 31 is used.
-
-  bclk-ratio:
-    description: Bit clock multiplier for an I2S instance. If not specified
-      a default value of 1 is used.
+      port@1:
+        $ref: audio-graph-port.yaml#
+        unevaluatedProperties: false
+        description: |
+          I2S DAP (Digital Audio Port) interface which can be connected
+          to external audio codec for playback or capture.
 
 required:
   - compatible
@@ -97,8 +96,6 @@ required:
   - clock-names
   - assigned-clocks
   - assigned-clock-parents
-  - "#sound-dai-cells"
-  - nvidia,ahub-i2s-id
 
 additionalProperties: false
 
@@ -115,8 +112,6 @@ examples:
         assigned-clock-parents = <&tegra_car TEGRA210_CLK_PLL_A_OUT0>;
         assigned-clock-rates = <1536000>;
         sound-name-prefix = "I2S1";
-        nvidia,ahub-i2s-id = <0>;
-        #sound-dai-cells = <1>;
     };
 
 ...

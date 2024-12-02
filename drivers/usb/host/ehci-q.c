@@ -64,7 +64,7 @@ qtd_fill(struct ehci_hcd *ehci, struct ehci_qtd *qtd, dma_addr_t buf,
 		}
 
 		/* short packets may only terminate transfers */
-		if (count != len && maxpacket)
+		if (count != len)
 			count -= (count % maxpacket);
 	}
 	qtd->hw_token = cpu_to_hc32(ehci, (count << 16) | token);
@@ -710,11 +710,9 @@ qh_urb_transaction (
 			one_more = 1;
 			token ^= 0x0100;	/* "in" <--> "out"  */
 			token |= QTD_TOGGLE;	/* force DATA1 */
-		} else if (maxpacket && usb_pipeout(urb->pipe)
-				&& (urb->transfer_flags &
-				URB_ZERO_PACKET) &&
-				!(urb->transfer_buffer_length %
-				maxpacket)) {
+		} else if (usb_pipeout(urb->pipe)
+				&& (urb->transfer_flags & URB_ZERO_PACKET)
+				&& !(urb->transfer_buffer_length % maxpacket)) {
 			one_more = 1;
 		}
 		if (one_more) {
@@ -1167,7 +1165,7 @@ submit_async (
  * performed; TRUE - SETUP and FALSE - IN+STATUS
  * Returns 0 if success
  */
-static int submit_single_step_set_feature(
+static int ehci_submit_single_step_set_feature(
 	struct usb_hcd  *hcd,
 	struct urb      *urb,
 	int             is_setup

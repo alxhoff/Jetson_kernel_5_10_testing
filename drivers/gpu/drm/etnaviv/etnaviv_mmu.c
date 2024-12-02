@@ -80,10 +80,10 @@ static int etnaviv_iommu_map(struct etnaviv_iommu_context *context, u32 iova,
 		return -EINVAL;
 
 	for_each_sgtable_dma_sg(sgt, sg, i) {
-		u32 pa = sg_dma_address(sg) - sg->offset;
+		phys_addr_t pa = sg_dma_address(sg) - sg->offset;
 		size_t bytes = sg_dma_len(sg) + sg->offset;
 
-		VERB("map[%d]: %08x %08x(%zx)", i, iova, pa, bytes);
+		VERB("map[%d]: %08x %pap(%zx)", i, iova, &pa, bytes);
 
 		ret = etnaviv_context_map(context, da, pa, bytes, prot);
 		if (ret)
@@ -123,6 +123,8 @@ static void etnaviv_iommu_remove_mapping(struct etnaviv_iommu_context *context,
 	struct etnaviv_vram_mapping *mapping)
 {
 	struct etnaviv_gem_object *etnaviv_obj = mapping->object;
+
+	lockdep_assert_held(&context->lock);
 
 	etnaviv_iommu_unmap(context, mapping->vram_node.start,
 			    etnaviv_obj->sgt, etnaviv_obj->base.size);
@@ -217,6 +219,8 @@ static int etnaviv_iommu_find_iova(struct etnaviv_iommu_context *context,
 static int etnaviv_iommu_insert_exact(struct etnaviv_iommu_context *context,
 		   struct drm_mm_node *node, size_t size, u64 va)
 {
+	lockdep_assert_held(&context->lock);
+
 	return drm_mm_insert_node_in_range(&context->mm, node, size, 0, 0, va,
 					   va + size, DRM_MM_INSERT_LOWEST);
 }
@@ -281,6 +285,12 @@ void etnaviv_iommu_unmap_gem(struct etnaviv_iommu_context *context,
 	WARN_ON(mapping->use);
 
 	mutex_lock(&context->lock);
+
+	/* Bail if the mapping has been reaped by another thread */
+	if (!mapping->context) {
+		mutex_unlock(&context->lock);
+		return;
+	}
 
 	/* If the vram node is on the mm, unmap and remove the node */
 	if (mapping->vram_node.mm == &context->mm)

@@ -6,10 +6,15 @@
  *
  * NFSv4 callback procedures
  */
+
+#include <linux/errno.h>
+#include <linux/math.h>
 #include <linux/nfs4.h>
 #include <linux/nfs_fs.h>
 #include <linux/slab.h>
 #include <linux/rcupdate.h>
+#include <linux/types.h>
+
 #include "nfs4_fs.h"
 #include "callback.h"
 #include "delegation.h"
@@ -283,6 +288,7 @@ static u32 initiate_file_draining(struct nfs_client *clp,
 		rv = NFS4_OK;
 		break;
 	case -ENOENT:
+		set_bit(NFS_LAYOUT_DRAIN, &lo->plh_flags);
 		/* Embrace your forgetfulness! */
 		rv = NFS4ERR_NOMATCHING_LAYOUT;
 

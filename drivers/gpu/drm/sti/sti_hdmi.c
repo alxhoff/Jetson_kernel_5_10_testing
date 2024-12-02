@@ -167,6 +167,12 @@ struct sti_hdmi_connector {
 #define to_sti_hdmi_connector(x) \
 	container_of(x, struct sti_hdmi_connector, drm_connector)
 
+static const struct drm_prop_enum_list colorspace_mode_names[] = {
+	{ HDMI_COLORSPACE_RGB, "rgb" },
+	{ HDMI_COLORSPACE_YUV422, "yuv422" },
+	{ HDMI_COLORSPACE_YUV444, "yuv444" },
+};
+
 u32 hdmi_read(struct sti_hdmi *hdmi, int offset)
 {
 	return readl(hdmi->regs + offset);
@@ -934,7 +940,7 @@ static void sti_hdmi_set_mode(struct drm_bridge *bridge,
 	DRM_DEBUG_DRIVER("\n");
 
 	/* Copy the drm display mode in the connector local structure */
-	memcpy(&hdmi->mode, mode, sizeof(struct drm_display_mode));
+	drm_mode_copy(&hdmi->mode, mode);
 
 	/* Update clock framerate according to the selected mode */
 	ret = clk_set_rate(hdmi->clk_pix, mode->clock * 1000);
@@ -997,8 +1003,9 @@ fail:
 
 #define CLK_TOLERANCE_HZ 50
 
-static int sti_hdmi_connector_mode_valid(struct drm_connector *connector,
-					struct drm_display_mode *mode)
+static enum drm_mode_status
+sti_hdmi_connector_mode_valid(struct drm_connector *connector,
+			      struct drm_display_mode *mode)
 {
 	int target = mode->clock * 1000;
 	int target_min = target - CLK_TOLERANCE_HZ;

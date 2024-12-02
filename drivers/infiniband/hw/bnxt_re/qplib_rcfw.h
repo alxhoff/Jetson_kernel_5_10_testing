@@ -138,6 +138,8 @@ struct bnxt_qplib_qp_node {
 #define FIRMWARE_INITIALIZED_FLAG	(0)
 #define FIRMWARE_FIRST_FLAG		(31)
 #define FIRMWARE_TIMED_OUT		(3)
+#define ERR_DEVICE_DETACHED             (4)
+
 struct bnxt_qplib_cmdq_mbox {
 	struct bnxt_qplib_reg_desc	reg;
 	void __iomem			*prod;
@@ -172,6 +174,7 @@ struct bnxt_qplib_creq_ctx {
 	u16				ring_id;
 	int				msix_vec;
 	bool				requested; /*irq handler installed */
+	char				*irq_name;
 };
 
 /* RCFW Communication Channels */

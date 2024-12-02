@@ -3,7 +3,6 @@
  * fs/direct-io.c
  *
  * Copyright (C) 2002, Linus Torvalds.
- * Copyright (C) 2017-2020, NVIDIA CORPORATION. All rights reserved.
  *
  * O_DIRECT
  *
@@ -427,6 +426,8 @@ static inline void dio_bio_submit(struct dio *dio, struct dio_submit *sdio)
 	unsigned long flags;
 
 	bio->bi_private = dio;
+	/* don't account direct I/O as memory stall */
+	bio_clear_flag(bio, BIO_WORKINGSET);
 
 	spin_lock_irqsave(&dio->bio_lock, flags);
 	dio->refcount++;
@@ -435,7 +436,7 @@ static inline void dio_bio_submit(struct dio *dio, struct dio_submit *sdio)
 	if (dio->is_async && dio->op == REQ_OP_READ && dio->should_dirty)
 		bio_set_pages_dirty(bio);
 
-	dio->bio_disk = bio->bi_disk;
+	dio->bio_disk = bio->bi_bdev->bd_disk;
 
 	if (sdio->submit_io) {
 		sdio->submit_io(bio, dio->inode, sdio->logical_offset_in_bio);
@@ -461,7 +462,7 @@ static inline void dio_cleanup(struct dio *dio, struct dio_submit *sdio)
  * Wait for the next BIO to complete.  Remove it and return it.  NULL is
  * returned once all BIOs have been completed.  This must only be called once
  * all bios have been issued so that dio->refcount can only decrease.  This
- * requires that that the caller hold a reference on the dio.
+ * requires that the caller hold a reference on the dio.
  */
 static struct bio *dio_await_one(struct dio *dio)
 {
@@ -631,7 +632,6 @@ static int get_more_blocks(struct dio *dio, struct dio_submit *sdio,
 	int ret;
 	sector_t fs_startblk;	/* Into file, in filesystem-sized blocks */
 	sector_t fs_endblk;	/* Into file, in filesystem-sized blocks */
-	long long startblk;	/* signed fs_startblk */
 	unsigned long fs_count;	/* Number of filesystem-sized blocks */
 	int create;
 	unsigned int i_blkbits = sdio->blkbits + sdio->blkfactor;
@@ -653,12 +653,6 @@ static int get_more_blocks(struct dio *dio, struct dio_submit *sdio,
 		map_bh->b_size = fs_count << i_blkbits;
 
 		/*
-		 * Explicity casting fs_startblk (unsigned long long) to
-		 * signed long long for comparison later with inode size
-		 */
-		startblk = (long long) fs_startblk;
-
-		/*
 		 * For writes that could fill holes inside i_size on a
 		 * DIO_SKIP_HOLES filesystem we forbid block creations: only
 		 * overwrites are permitted. We will return early to the caller
@@ -672,7 +666,7 @@ static int get_more_blocks(struct dio *dio, struct dio_submit *sdio,
 		create = dio->op == REQ_OP_WRITE;
 		if (dio->flags & DIO_SKIP_HOLES) {
 			i_size = i_size_read(dio->inode);
-			if (i_size && startblk <= (i_size - 1) >> i_blkbits)
+			if (i_size && fs_startblk <= (i_size - 1) >> i_blkbits)
 				create = 0;
 		}
 
@@ -701,7 +695,7 @@ static inline int dio_new_bio(struct dio *dio, struct dio_submit *sdio,
 	if (ret)
 		goto out;
 	sector = start_sector << (sdio->blkbits - 9);
-	nr_pages = min(sdio->pages_in_io, BIO_MAX_PAGES);
+	nr_pages = bio_max_segs(sdio->pages_in_io);
 	BUG_ON(nr_pages <= 0);
 	dio_bio_alloc(dio, sdio, map_bh->b_bdev, sector, nr_pages);
 	sdio->boundary = 0;
@@ -1286,7 +1280,7 @@ do_blockdev_direct_IO(struct kiocb *iocb, struct inode *inode,
 	if (retval == -ENOTBLK) {
 		/*
 		 * The remaining part of the request will be
-		 * be handled by buffered I/O when we return
+		 * handled by buffered I/O when we return
 		 */
 		retval = 0;
 	}

@@ -10,12 +10,12 @@
 #include "lkc.h"
 
 /* file already present in list? If not add it */
-struct file *file_lookup(const char *name, int overlay_id, const char *logical_name)
+struct file *file_lookup(const char *name)
 {
 	struct file *file;
 
 	for (file = file_list; file; file = file->next) {
-		if (!strcmp(name, file->name) && overlay_id == file->overlay_id) {
+		if (!strcmp(name, file->name)) {
 			return file;
 		}
 	}
@@ -23,8 +23,6 @@ struct file *file_lookup(const char *name, int overlay_id, const char *logical_n
 	file = xmalloc(sizeof(*file));
 	memset(file, 0, sizeof(*file));
 	file->name = xstrdup(name);
-	file->overlay_id = overlay_id;
-	file->logical_name = xstrdup(logical_name);
 	file->next = file_list;
 	file_list = file;
 	return file;

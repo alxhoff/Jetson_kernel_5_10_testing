@@ -24,11 +24,11 @@ config PINCTRL_TEGRA210
 	bool
 	select PINCTRL_TEGRA
 
-config PINCTRL_TEGRA186
+config PINCTRL_TEGRA194
 	bool
 	select PINCTRL_TEGRA
 
-config PINCTRL_TEGRA194
+config PINCTRL_TEGRA234
 	bool
 	select PINCTRL_TEGRA
 

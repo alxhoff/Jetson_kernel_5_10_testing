@@ -6,37 +6,6 @@
  * Copyright (C) 2009 Samsung Electronics
  *                    Author: Michal Nazarewicz <mina86@mina86.com>
  * All rights reserved.
- * Copyright (c) 2020, NVIDIA CORPORATION.  All rights reserved.
- *
- * Redistribution and use in source and binary forms, with or without
- * modification, are permitted provided that the following conditions
- * are met:
- * 1. Redistributions of source code must retain the above copyright
- *    notice, this list of conditions, and the following disclaimer,
- *    without modification.
- * 2. Redistributions in binary form must reproduce the above copyright
- *    notice, this list of conditions and the following disclaimer in the
- *    documentation and/or other materials provided with the distribution.
- * 3. The names of the above-listed copyright holders may not be used
- *    to endorse or promote products derived from this software without
- *    specific prior written permission.
- *
- * ALTERNATIVELY, this software may be distributed under the terms of the
- * GNU General Public License ("GPL") as published by the Free Software
- * Foundation, either version 2 of that License or (at your option) any
- * later version.
- *
- * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS
- * IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO,
- * THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR
- * PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT OWNER OR
- * CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL,
- * EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO,
- * PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR
- * PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF
- * LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING
- * NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
- * SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  */
 
 /*
@@ -352,8 +321,6 @@ static inline struct fsg_dev *fsg_from_func(struct usb_function *f)
 	return container_of(f, struct fsg_dev, function);
 }
 
-typedef void (*fsg_routine_t)(struct fsg_dev *);
-
 static int exception_in_progress(struct fsg_common *common)
 {
 	return common->state > FSG_STATE_NORMAL;
@@ -621,7 +588,7 @@ static int sleep_thread(struct fsg_common *common, bool can_freeze,
 static int do_read(struct fsg_common *common)
 {
 	struct fsg_lun		*curlun = common->curlun;
-	u32			lba;
+	u64			lba;
 	struct fsg_buffhd	*bh;
 	int			rc;
 	u32			amount_left;
@@ -636,7 +603,10 @@ static int do_read(struct fsg_common *common)
 	if (common->cmnd[0] == READ_6)
 		lba = get_unaligned_be24(&common->cmnd[1]);
 	else {
-		lba = get_unaligned_be32(&common->cmnd[2]);
+		if (common->cmnd[0] == READ_16)
+			lba = get_unaligned_be64(&common->cmnd[2]);
+		else		/* READ_10 or READ_12 */
+			lba = get_unaligned_be32(&common->cmnd[2]);
 
 		/*
 		 * We allow DPO (Disable Page Out = don't save data in the
@@ -749,7 +719,7 @@ static int do_read(struct fsg_common *common)
 static int do_write(struct fsg_common *common)
 {
 	struct fsg_lun		*curlun = common->curlun;
-	u32			lba;
+	u64			lba;
 	struct fsg_buffhd	*bh;
 	int			get_some_more;
 	u32			amount_left_to_req, amount_left_to_write;
@@ -773,7 +743,10 @@ static int do_write(struct fsg_common *common)
 	if (common->cmnd[0] == WRITE_6)
 		lba = get_unaligned_be24(&common->cmnd[1]);
 	else {
-		lba = get_unaligned_be32(&common->cmnd[2]);
+		if (common->cmnd[0] == WRITE_16)
+			lba = get_unaligned_be64(&common->cmnd[2]);
+		else		/* WRITE_10 or WRITE_12 */
+			lba = get_unaligned_be32(&common->cmnd[2]);
 
 		/*
 		 * We allow DPO (Disable Page Out = don't save data in the
@@ -952,7 +925,7 @@ static void invalidate_sub(struct fsg_lun *curlun)
 {
 	struct file	*filp = curlun->filp;
 	struct inode	*inode = file_inode(filp);
-	unsigned long	rc;
+	unsigned long __maybe_unused	rc;
 
 	rc = invalidate_mapping_pages(inode->i_mapping, 0, -1);
 	VLDBG(curlun, "invalidate_mapping_pages -> %ld\n", rc);
@@ -1148,6 +1121,7 @@ static int do_read_capacity(struct fsg_common *common, struct fsg_buffhd *bh)
 	u32		lba = get_unaligned_be32(&common->cmnd[2]);
 	int		pmi = common->cmnd[8];
 	u8		*buf = (u8 *)bh->buf;
+	u32		max_lba;
 
 	/* Check the PMI and LBA fields */
 	if (pmi > 1 || (pmi == 0 && lba != 0)) {
@@ -1155,10 +1129,35 @@ static int do_read_capacity(struct fsg_common *common, struct fsg_buffhd *bh)
 		return -EINVAL;
 	}
 
-	put_unaligned_be32(curlun->num_sectors - 1, &buf[0]);
-						/* Max logical block */
-	put_unaligned_be32(curlun->blksize, &buf[4]);/* Block length */
+	if (curlun->num_sectors < 0x100000000ULL)
+		max_lba = curlun->num_sectors - 1;
+	else
+		max_lba = 0xffffffff;
+	put_unaligned_be32(max_lba, &buf[0]);		/* Max logical block */
+	put_unaligned_be32(curlun->blksize, &buf[4]);	/* Block length */
 	return 8;
+}
+
+static int do_read_capacity_16(struct fsg_common *common, struct fsg_buffhd *bh)
+{
+	struct fsg_lun  *curlun = common->curlun;
+	u64		lba = get_unaligned_be64(&common->cmnd[2]);
+	int		pmi = common->cmnd[14];
+	u8		*buf = (u8 *)bh->buf;
+
+	/* Check the PMI and LBA fields */
+	if (pmi > 1 || (pmi == 0 && lba != 0)) {
+		curlun->sense_data = SS_INVALID_FIELD_IN_CDB;
+		return -EINVAL;
+	}
+
+	put_unaligned_be64(curlun->num_sectors - 1, &buf[0]);
+							/* Max logical block */
+	put_unaligned_be32(curlun->blksize, &buf[8]);	/* Block length */
+
+	/* It is safe to keep other fields zeroed */
+	memset(&buf[12], 0, 32 - 12);
+	return 32;
 }
 
 static int do_read_header(struct fsg_common *common, struct fsg_buffhd *bh)
@@ -1441,29 +1440,6 @@ static int wedge_bulk_in_endpoint(struct fsg_dev *fsg)
 		if (msleep_interruptible(100) != 0)
 			return -EINTR;
 		rc = usb_ep_set_wedge(fsg->bulk_in);
-	}
-	return rc;
-}
-
-static int wedge_bulk_out_endpoint(struct fsg_dev *fsg)
-{
-	int	rc;
-
-	DBG(fsg, "bulk-out set wedge\n");
-	rc = usb_ep_set_wedge(fsg->bulk_out);
-	if (rc == -EAGAIN)
-		VDBG(fsg, "delayed bulk-out endpoint wedge\n");
-	while (rc != 0) {
-		if (rc != -EAGAIN) {
-			WARNING(fsg, "usb_ep_set_wedge -> %d\n", rc);
-			rc = 0;
-			break;
-		}
-
-		/* Wait for a short time and then try again */
-		if (msleep_interruptible(100) != 0)
-			return -EINTR;
-		rc = usb_ep_set_wedge(fsg->bulk_out);
 	}
 	return rc;
 }
@@ -1930,6 +1906,17 @@ static int do_scsi_command(struct fsg_common *common)
 			reply = do_read(common);
 		break;
 
+	case READ_16:
+		common->data_size_from_cmnd =
+				get_unaligned_be32(&common->cmnd[10]);
+		reply = check_command_size_in_blocks(common, 16,
+				      DATA_DIR_TO_HOST,
+				      (1<<1) | (0xff<<2) | (0xf<<10), 1,
+				      "READ(16)");
+		if (reply == 0)
+			reply = do_read(common);
+		break;
+
 	case READ_CAPACITY:
 		common->data_size_from_cmnd = 8;
 		reply = check_command(common, 10, DATA_DIR_TO_HOST,
@@ -1980,6 +1967,25 @@ static int do_scsi_command(struct fsg_common *common)
 				      "REQUEST SENSE");
 		if (reply == 0)
 			reply = do_request_sense(common, bh);
+		break;
+
+	case SERVICE_ACTION_IN_16:
+		switch (common->cmnd[1] & 0x1f) {
+
+		case SAI_READ_CAPACITY_16:
+			common->data_size_from_cmnd =
+				get_unaligned_be32(&common->cmnd[10]);
+			reply = check_command(common, 16, DATA_DIR_TO_HOST,
+					      (1<<1) | (0xff<<2) | (0xf<<10) |
+					      (1<<14), 1,
+					      "READ CAPACITY(16)");
+			if (reply == 0)
+				reply = do_read_capacity_16(common, bh);
+			break;
+
+		default:
+			goto unknown_cmnd;
+		}
 		break;
 
 	case START_STOP:
@@ -2053,6 +2059,17 @@ static int do_scsi_command(struct fsg_common *common)
 			reply = do_write(common);
 		break;
 
+	case WRITE_16:
+		common->data_size_from_cmnd =
+				get_unaligned_be32(&common->cmnd[10]);
+		reply = check_command_size_in_blocks(common, 16,
+				      DATA_DIR_FROM_HOST,
+				      (1<<1) | (0xff<<2) | (0xf<<10), 1,
+				      "WRITE(16)");
+		if (reply == 0)
+			reply = do_write(common);
+		break;
+
 	/*
 	 * Some mandatory commands that we recognize but don't implement.
 	 * They don't mean much in this setting.  It's left as an exercise
@@ -2121,18 +2138,12 @@ static int received_cbw(struct fsg_dev *fsg, struct fsg_buffhd *bh)
 		 * retain this state until the next reset, but there's
 		 * no way to tell the controller driver it should ignore
 		 * Clear-Feature(HALT) requests.
+		 *
+		 * We aren't required to halt the OUT endpoint; instead
+		 * we can simply accept and discard any data received
+		 * until the next reset.
 		 */
 		wedge_bulk_in_endpoint(fsg);
-
-		/*
-		 * According to 5.3.4 Reset Recovery, Clear-Feature(HALT) would
-		 * be issued after a Bulk-Only Mass Storage Reset. If Bulk-Out
-		 * endpoint is not stalled here, Clear-Feature(HALT) on the
-		 * Bulk-Out endpoint results in sequence number mismatch between
-		 * host and device on some USB device controller (e.g. TEGRA USB
-		 * device controller).
-		 */
-		wedge_bulk_out_endpoint(fsg);
 		set_bit(IGNORE_BULK_OUT, &fsg->atomic_bitflags);
 		return -EINVAL;
 	}
@@ -2434,10 +2445,8 @@ static void handle_exception(struct fsg_common *common)
 		if (!fsg_is_set(common))
 			break;
 		if (test_and_clear_bit(IGNORE_BULK_OUT,
-				       &common->fsg->atomic_bitflags)) {
-			usb_ep_clear_halt(common->fsg->bulk_out);
+				       &common->fsg->atomic_bitflags))
 			usb_ep_clear_halt(common->fsg->bulk_in);
-		}
 
 		if (common->ep0_req_tag == exception_req_tag)
 			ep0_queue(common);	/* Complete the status stage */

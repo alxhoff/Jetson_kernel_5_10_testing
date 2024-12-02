@@ -23,6 +23,7 @@
 #include "ef100_rx.h"
 #include "ef100_tx.h"
 #include "ef100_netdev.h"
+#include "rx_common.h"
 
 #define EF100_MAX_VIS 4096
 #define EF100_NUM_MCDI_BUFFERS	1
@@ -182,8 +183,20 @@ static int efx_ef100_init_datapath_caps(struct efx_nic *efx)
 	if (rc)
 		return rc;
 
-	if (efx_ef100_has_cap(nic_data->datapath_caps2, TX_TSO_V3))
-		efx->net_dev->features |= NETIF_F_TSO | NETIF_F_TSO6;
+	if (efx_ef100_has_cap(nic_data->datapath_caps2, TX_TSO_V3)) {
+		struct net_device *net_dev = efx->net_dev;
+		netdev_features_t tso = NETIF_F_TSO | NETIF_F_TSO6 | NETIF_F_GSO_PARTIAL |
+					NETIF_F_GSO_UDP_TUNNEL | NETIF_F_GSO_UDP_TUNNEL_CSUM |
+					NETIF_F_GSO_GRE | NETIF_F_GSO_GRE_CSUM;
+
+		net_dev->features |= tso;
+		net_dev->hw_features |= tso;
+		net_dev->hw_enc_features |= tso;
+		/* EF100 HW can only offload outer checksums if they are UDP,
+		 * so for GRE_CSUM we have to use GSO_PARTIAL.
+		 */
+		net_dev->gso_partial_features |= NETIF_F_GSO_GRE_CSUM;
+	}
 	efx->num_mac_stats = MCDI_WORD(outbuf,
 				       GET_CAPABILITIES_V4_OUT_MAC_STATS_NUM_STATS);
 	netif_dbg(efx, probe, efx->net_dev,
@@ -684,12 +697,18 @@ static unsigned int ef100_check_caps(const struct efx_nic *efx,
 	}
 }
 
+static unsigned int efx_ef100_recycle_ring_size(const struct efx_nic *efx)
+{
+	/* Maximum link speed for Riverhead is 100G */
+	return 10 * EFX_RECYCLE_RING_SIZE_10G;
+}
+
 /*	NIC level access functions
  */
 #define EF100_OFFLOAD_FEATURES	(NETIF_F_HW_CSUM | NETIF_F_RXCSUM |	\
 	NETIF_F_HIGHDMA | NETIF_F_SG | NETIF_F_FRAGLIST | NETIF_F_NTUPLE | \
 	NETIF_F_RXHASH | NETIF_F_RXFCS | NETIF_F_TSO_ECN | NETIF_F_RXALL | \
-	NETIF_F_TSO_MANGLEID | NETIF_F_HW_VLAN_CTAG_TX)
+	NETIF_F_HW_VLAN_CTAG_TX)
 
 const struct efx_nic_type ef100_pf_nic_type = {
 	.revision = EFX_REV_EF100,
@@ -758,6 +777,7 @@ const struct efx_nic_type ef100_pf_nic_type = {
 	.rx_push_rss_context_config = efx_mcdi_rx_push_rss_context_config,
 	.rx_pull_rss_context_config = efx_mcdi_rx_pull_rss_context_config,
 	.rx_restore_rss_contexts = efx_mcdi_rx_restore_rss_contexts,
+	.rx_recycle_ring_size = efx_ef100_recycle_ring_size,
 
 	.reconfigure_mac = ef100_reconfigure_mac,
 	.reconfigure_port = efx_mcdi_port_reconfigure,
@@ -837,6 +857,7 @@ const struct efx_nic_type ef100_vf_nic_type = {
 	.rx_pull_rss_config = efx_mcdi_rx_pull_rss_config,
 	.rx_push_rss_config = efx_mcdi_pf_rx_push_rss_config,
 	.rx_restore_rss_contexts = efx_mcdi_rx_restore_rss_contexts,
+	.rx_recycle_ring_size = efx_ef100_recycle_ring_size,
 
 	.reconfigure_mac = ef100_reconfigure_mac,
 	.test_nvram = efx_new_mcdi_nvram_test_all,
@@ -1104,6 +1125,9 @@ static int ef100_probe_main(struct efx_nic *efx)
 	nic_data->efx = efx;
 	net_dev->features |= efx->type->offload_features;
 	net_dev->hw_features |= efx->type->offload_features;
+	net_dev->hw_enc_features |= efx->type->offload_features;
+	net_dev->vlan_features |= NETIF_F_HW_CSUM | NETIF_F_SG |
+				  NETIF_F_HIGHDMA | NETIF_F_ALL_TSO;
 
 	/* Populate design-parameter defaults */
 	nic_data->tso_max_hdr_len = ESE_EF100_DP_GZ_TSO_MAX_HDR_LEN_DEFAULT;

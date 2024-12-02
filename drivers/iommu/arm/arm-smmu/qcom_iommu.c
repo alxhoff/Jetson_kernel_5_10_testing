@@ -10,7 +10,6 @@
 #include <linux/bitfield.h>
 #include <linux/clk.h>
 #include <linux/delay.h>
-#include <linux/dma-iommu.h>
 #include <linux/dma-mapping.h>
 #include <linux/err.h>
 #include <linux/interrupt.h>
@@ -25,7 +24,6 @@
 #include <linux/of.h>
 #include <linux/of_address.h>
 #include <linux/of_device.h>
-#include <linux/of_iommu.h>
 #include <linux/platform_device.h>
 #include <linux/pm.h>
 #include <linux/pm_runtime.h>
@@ -185,13 +183,6 @@ static void qcom_iommu_tlb_flush_walk(unsigned long iova, size_t size,
 	qcom_iommu_tlb_sync(cookie);
 }
 
-static void qcom_iommu_tlb_flush_leaf(unsigned long iova, size_t size,
-				      size_t granule, void *cookie)
-{
-	qcom_iommu_tlb_inv_range_nosync(iova, size, granule, true, cookie);
-	qcom_iommu_tlb_sync(cookie);
-}
-
 static void qcom_iommu_tlb_add_page(struct iommu_iotlb_gather *gather,
 				    unsigned long iova, size_t granule,
 				    void *cookie)
@@ -202,7 +193,6 @@ static void qcom_iommu_tlb_add_page(struct iommu_iotlb_gather *gather,
 static const struct iommu_flush_ops qcom_flush_ops = {
 	.tlb_flush_all	= qcom_iommu_tlb_inv_context,
 	.tlb_flush_walk = qcom_iommu_tlb_flush_walk,
-	.tlb_flush_leaf = qcom_iommu_tlb_flush_leaf,
 	.tlb_add_page	= qcom_iommu_tlb_add_page,
 };
 
@@ -283,6 +273,13 @@ static int qcom_iommu_init_domain(struct iommu_domain *domain,
 			ctx->secure_init = true;
 		}
 
+		/* Disable context bank before programming */
+		iommu_writel(ctx, ARM_SMMU_CB_SCTLR, 0);
+
+		/* Clear context bank fault address fault status registers */
+		iommu_writel(ctx, ARM_SMMU_CB_FAR, 0);
+		iommu_writel(ctx, ARM_SMMU_CB_FSR, ARM_SMMU_FSR_FAULT);
+
 		/* TTBRs */
 		iommu_writeq(ctx, ARM_SMMU_CB_TTBR0,
 				pgtbl_cfg.arm_lpae_s1_cfg.ttbr |
@@ -344,12 +341,6 @@ static struct iommu_domain *qcom_iommu_domain_alloc(unsigned type)
 	if (!qcom_domain)
 		return NULL;
 
-	if (type == IOMMU_DOMAIN_DMA &&
-	    iommu_get_dma_cookie(&qcom_domain->domain)) {
-		kfree(qcom_domain);
-		return NULL;
-	}
-
 	mutex_init(&qcom_domain->init_mutex);
 	spin_lock_init(&qcom_domain->pgtbl_lock);
 
@@ -359,8 +350,6 @@ static struct iommu_domain *qcom_iommu_domain_alloc(unsigned type)
 static void qcom_iommu_domain_free(struct iommu_domain *domain)
 {
 	struct qcom_iommu_domain *qcom_domain = to_qcom_iommu_domain(domain);
-
-	iommu_put_dma_cookie(domain);
 
 	if (qcom_domain->iommu) {
 		/*
@@ -433,8 +422,7 @@ static void qcom_iommu_detach_dev(struct iommu_domain *domain, struct device *de
 }
 
 static int qcom_iommu_map(struct iommu_domain *domain, unsigned long iova,
-			  phys_addr_t paddr, size_t size, int prot, gfp_t gfp,
-			  struct iommu_iotlb_gather *gather)
+			  phys_addr_t paddr, size_t size, int prot, gfp_t gfp)
 {
 	int ret;
 	unsigned long flags;
@@ -767,9 +755,12 @@ static bool qcom_iommu_has_secure_context(struct qcom_iommu_dev *qcom_iommu)
 {
 	struct device_node *child;
 
-	for_each_child_of_node(qcom_iommu->dev->of_node, child)
-		if (of_device_is_compatible(child, "qcom,msm-iommu-v1-sec"))
+	for_each_child_of_node(qcom_iommu->dev->of_node, child) {
+		if (of_device_is_compatible(child, "qcom,msm-iommu-v1-sec")) {
+			of_node_put(child);
 			return true;
+		}
+	}
 
 	return false;
 }
@@ -856,10 +847,7 @@ static int qcom_iommu_device_probe(struct platform_device *pdev)
 		return ret;
 	}
 
-	iommu_device_set_ops(&qcom_iommu->iommu, &qcom_iommu_ops);
-	iommu_device_set_fwnode(&qcom_iommu->iommu, dev->fwnode);
-
-	ret = iommu_device_register(&qcom_iommu->iommu);
+	ret = iommu_device_register(&qcom_iommu->iommu, &qcom_iommu_ops, dev);
 	if (ret) {
 		dev_err(dev, "Failed to register iommu\n");
 		return ret;

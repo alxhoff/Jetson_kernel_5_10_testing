@@ -19,11 +19,6 @@
 #include <linux/sched.h>
 #include <linux/types.h>
 
-#define SE_STORE_KEY_IN_MEM    0x0001
-#define SE_MAGIC_PATTERN_OFFSET 16
-#define IS_KEY_IN_MEM(x) \
-		((((x) >> SE_MAGIC_PATTERN_OFFSET) == SE_STORE_KEY_IN_MEM))
-
 struct crypto_instance;
 struct crypto_template;
 
@@ -33,6 +28,18 @@ struct crypto_larval {
 	struct completion completion;
 	u32 mask;
 };
+
+enum {
+	CRYPTOA_UNSPEC,
+	CRYPTOA_ALG,
+	CRYPTOA_TYPE,
+	__CRYPTOA_MAX,
+};
+
+#define CRYPTOA_MAX (__CRYPTOA_MAX - 1)
+
+/* Maximum number of (rtattr) parameters for each template. */
+#define CRYPTO_MAX_ATTRS 32
 
 extern struct list_head crypto_alg_list;
 extern struct rw_semaphore crypto_alg_sem;

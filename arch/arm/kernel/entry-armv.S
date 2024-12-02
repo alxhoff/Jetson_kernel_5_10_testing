@@ -206,11 +206,18 @@ __irq_svc:
 
 #ifdef CONFIG_PREEMPTION
 	ldr	r8, [tsk, #TI_PREEMPT]		@ get preempt count
-	ldr	r0, [tsk, #TI_FLAGS]		@ get flags
 	teq	r8, #0				@ if preempt count != 0
+	bne	1f				@ return from exeption
+	ldr	r0, [tsk, #TI_FLAGS]		@ get flags
+	tst	r0, #_TIF_NEED_RESCHED		@ if NEED_RESCHED is set
+	blne	svc_preempt			@ preempt!
+
+	ldr	r8, [tsk, #TI_PREEMPT_LAZY]	@ get preempt lazy count
+	teq	r8, #0				@ if preempt lazy count != 0
 	movne	r0, #0				@ force flags to 0
-	tst	r0, #_TIF_NEED_RESCHED
+	tst	r0, #_TIF_NEED_RESCHED_LAZY
 	blne	svc_preempt
+1:
 #endif
 
 	svc_exit r5, irq = 1			@ return from exception
@@ -225,8 +232,14 @@ svc_preempt:
 1:	bl	preempt_schedule_irq		@ irq en/disable is done inside
 	ldr	r0, [tsk, #TI_FLAGS]		@ get new tasks TI_FLAGS
 	tst	r0, #_TIF_NEED_RESCHED
+	bne	1b
+	tst	r0, #_TIF_NEED_RESCHED_LAZY
 	reteq	r8				@ go again
-	b	1b
+	ldr	r0, [tsk, #TI_PREEMPT_LAZY]	@ get preempt lazy count
+	teq	r0, #0				@ if preempt lazy count != 0
+	beq	1b
+	ret	r8				@ go again
+
 #endif
 
 __und_fault:
@@ -406,7 +419,8 @@ ENDPROC(__fiq_abt)
 	@ if it was interrupted in a critical region.  Here we
 	@ perform a quick test inline since it should be false
 	@ 99.9999% of the time.  The rest is done out of line.
-	cmp	r4, #TASK_SIZE
+	ldr	r0, =TASK_SIZE
+	cmp	r4, r0
 	blhs	kuser_cmpxchg64_fixup
 #endif
 #endif
@@ -615,15 +629,9 @@ call_fpe:
 	W(b)	do_fpe				@ CP#1 (FPE)
 	W(b)	do_fpe				@ CP#2 (FPE)
 	ret.w	lr				@ CP#3
-#ifdef CONFIG_CRUNCH
-	b	crunch_task_enable		@ CP#4 (MaverickCrunch)
-	b	crunch_task_enable		@ CP#5 (MaverickCrunch)
-	b	crunch_task_enable		@ CP#6 (MaverickCrunch)
-#else
 	ret.w	lr				@ CP#4
 	ret.w	lr				@ CP#5
 	ret.w	lr				@ CP#6
-#endif
 	ret.w	lr				@ CP#7
 	ret.w	lr				@ CP#8
 	ret.w	lr				@ CP#9

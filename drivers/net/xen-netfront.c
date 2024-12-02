@@ -66,6 +66,10 @@ module_param_named(max_queues, xennet_max_queues, uint, 0644);
 MODULE_PARM_DESC(max_queues,
 		 "Maximum number of queues per virtual interface");
 
+static bool __read_mostly xennet_trusted = true;
+module_param_named(trusted, xennet_trusted, bool, 0644);
+MODULE_PARM_DESC(trusted, "Is the backend trusted");
+
 #define XENNET_TIMEOUT  (5 * HZ)
 
 static const struct ethtool_ops xennet_ethtool_ops;
@@ -175,6 +179,9 @@ struct netfront_info {
 	/* Is device behaving sane? */
 	bool broken;
 
+	/* Should skbs be bounced into a zeroed buffer? */
+	bool bounce;
+
 	atomic_t rx_gso_checksum_fixup;
 };
 
@@ -273,7 +280,8 @@ static struct sk_buff *xennet_alloc_one_rx_buffer(struct netfront_queue *queue)
 	if (unlikely(!skb))
 		return NULL;
 
-	page = page_pool_dev_alloc_pages(queue->page_pool);
+	page = page_pool_alloc_pages(queue->page_pool,
+				     GFP_ATOMIC | __GFP_NOWARN | __GFP_ZERO);
 	if (unlikely(!page)) {
 		kfree_skb(skb);
 		return NULL;
@@ -642,8 +650,8 @@ static int xennet_xdp_xmit(struct net_device *dev, int n,
 	struct netfront_info *np = netdev_priv(dev);
 	struct netfront_queue *queue = NULL;
 	unsigned long irq_flags;
-	int drops = 0;
-	int i, err;
+	int nxmit = 0;
+	int i;
 
 	if (unlikely(np->broken))
 		return -ENODEV;
@@ -658,17 +666,42 @@ static int xennet_xdp_xmit(struct net_device *dev, int n,
 
 		if (!xdpf)
 			continue;
-		err = xennet_xdp_xmit_one(dev, queue, xdpf);
-		if (err) {
-			xdp_return_frame_rx_napi(xdpf);
-			drops++;
-		}
+		if (xennet_xdp_xmit_one(dev, queue, xdpf))
+			break;
+		nxmit++;
 	}
 	spin_unlock_irqrestore(&queue->tx_lock, irq_flags);
 
-	return n - drops;
+	return nxmit;
 }
 
+struct sk_buff *bounce_skb(const struct sk_buff *skb)
+{
+	unsigned int headerlen = skb_headroom(skb);
+	/* Align size to allocate full pages and avoid contiguous data leaks */
+	unsigned int size = ALIGN(skb_end_offset(skb) + skb->data_len,
+				  XEN_PAGE_SIZE);
+	struct sk_buff *n = alloc_skb(size, GFP_ATOMIC | __GFP_ZERO);
+
+	if (!n)
+		return NULL;
+
+	if (!IS_ALIGNED((uintptr_t)n->head, XEN_PAGE_SIZE)) {
+		WARN_ONCE(1, "misaligned skb allocated\n");
+		kfree_skb(n);
+		return NULL;
+	}
+
+	/* Set the data pointer */
+	skb_reserve(n, headerlen);
+	/* Set the tail pointer and length */
+	skb_put(n, skb->len);
+
+	BUG_ON(skb_copy_bits(skb, -headerlen, n->head, headerlen + skb->len));
+
+	skb_copy_header(n, skb);
+	return n;
+}
 
 #define MAX_XEN_SKB_FRAGS (65536 / XEN_PAGE_SIZE + 1)
 
@@ -722,9 +755,13 @@ static netdev_tx_t xennet_start_xmit(struct sk_buff *skb, struct net_device *dev
 
 	/* The first req should be at least ETH_HLEN size or the packet will be
 	 * dropped by netback.
+	 *
+	 * If the backend is not trusted bounce all data to zeroed pages to
+	 * avoid exposing contiguous data on the granted page not belonging to
+	 * the skb.
 	 */
-	if (unlikely(PAGE_SIZE - offset < ETH_HLEN)) {
-		nskb = skb_copy(skb, GFP_ATOMIC);
+	if (np->bounce || unlikely(PAGE_SIZE - offset < ETH_HLEN)) {
+		nskb = bounce_skb(skb);
 		if (!nskb)
 			goto drop;
 		dev_consume_skb_any(skb);
@@ -938,12 +975,10 @@ static u32 xennet_run_xdp(struct netfront_queue *queue, struct page *pdata,
 	u32 act;
 	int err;
 
-	xdp->data_hard_start = page_address(pdata);
-	xdp->data = xdp->data_hard_start + XDP_PACKET_HEADROOM;
-	xdp_set_data_meta_invalid(xdp);
-	xdp->data_end = xdp->data + len;
-	xdp->rxq = &queue->xdp_rxq;
-	xdp->frame_sz = XEN_PAGE_SIZE - XDP_PACKET_HEADROOM;
+	xdp_init_buff(xdp, XEN_PAGE_SIZE - XDP_PACKET_HEADROOM,
+		      &queue->xdp_rxq);
+	xdp_prepare_buff(xdp, page_address(pdata), XDP_PACKET_HEADROOM,
+			 len, false);
 
 	act = bpf_prog_run_xdp(prog, xdp);
 	switch (act) {
@@ -951,7 +986,9 @@ static u32 xennet_run_xdp(struct netfront_queue *queue, struct page *pdata,
 		get_page(pdata);
 		xdpf = xdp_convert_buff_to_frame(xdp);
 		err = xennet_xdp_xmit(queue->info->netdev, 1, &xdpf, 0);
-		if (unlikely(err < 0))
+		if (unlikely(!err))
+			xdp_return_frame_rx_napi(xdpf);
+		else if (unlikely(err < 0))
 			trace_xdp_exception(queue->info->netdev, prog, act);
 		break;
 	case XDP_REDIRECT:
@@ -1057,8 +1094,10 @@ static int xennet_get_responses(struct netfront_queue *queue,
 			}
 		}
 		rcu_read_unlock();
-next:
+
 		__skb_queue_tail(list, skb);
+
+next:
 		if (!(rx->flags & XEN_NETRXF_more_data))
 			break;
 
@@ -1733,7 +1772,7 @@ static struct net_device *xennet_create_dev(struct xenbus_device *dev)
 	return ERR_PTR(err);
 }
 
-/**
+/*
  * Entry point to this code when a new device is created.  Allocate the basic
  * structures and the ring buffers for communication with the backend, and
  * inform the backend of the appropriate details for those.
@@ -1810,7 +1849,7 @@ static void xennet_disconnect_backend(struct netfront_info *info)
 	}
 }
 
-/**
+/*
  * We are reconnecting to the backend, due to a suspend/resume, or a backend
  * driver restart.  We tear down our netif structure and recreate it, but
  * leave the device-layer structures intact so that this is transparent to the
@@ -1827,6 +1866,12 @@ static int netfront_resume(struct xenbus_device *dev)
 	netif_tx_unlock_bh(info->netdev);
 
 	xennet_disconnect_backend(info);
+
+	rtnl_lock();
+	if (info->queues)
+		xennet_destroy_queues(info);
+	rtnl_unlock();
+
 	return 0;
 }
 
@@ -1969,7 +2014,7 @@ static int setup_netfront(struct xenbus_device *dev,
 	 *  a) feature-split-event-channels == 0
 	 *  b) feature-split-event-channels == 1 but failed to setup
 	 */
-	if (!feature_split_evtchn || (feature_split_evtchn && err))
+	if (!feature_split_evtchn || err)
 		err = setup_netfront_single(queue);
 
 	if (err)
@@ -2163,7 +2208,7 @@ static int xennet_create_page_pool(struct netfront_queue *queue)
 	}
 
 	err = xdp_rxq_info_reg(&queue->xdp_rxq, queue->info->netdev,
-			       queue->id);
+			       queue->id, 0);
 	if (err) {
 		netdev_err(queue->info->netdev, "xdp_rxq_info_reg failed\n");
 		goto err_free_pp;
@@ -2247,6 +2292,10 @@ static int talk_to_netback(struct xenbus_device *dev,
 	unsigned int num_queues = 1;
 
 	info->netdev->irq = 0;
+
+	/* Check if backend is trusted. */
+	info->bounce = !xennet_trusted ||
+		       !xenbus_read_unsigned(dev->nodename, "trusted", 1);
 
 	/* Check if backend supports multiple queues */
 	max_queues = xenbus_read_unsigned(info->xbdev->otherend,
@@ -2414,6 +2463,9 @@ static int xennet_connect(struct net_device *dev)
 		return err;
 	if (np->netback_has_xdp_headroom)
 		pr_info("backend supports XDP headroom\n");
+	if (np->bounce)
+		dev_info(&np->xbdev->dev,
+			 "bouncing transmitted data to zeroed pages\n");
 
 	/* talk_to_netback() sets the correct number of queues */
 	num_queues = dev->real_num_tx_queues;
@@ -2461,7 +2513,7 @@ static int xennet_connect(struct net_device *dev)
 	return 0;
 }
 
-/**
+/*
  * Callback received when the backend's state changes.
  */
 static void netback_changed(struct xenbus_device *dev,
@@ -2569,12 +2621,11 @@ static ssize_t store_rxbuf(struct device *dev,
 			   const char *buf, size_t len)
 {
 	char *endp;
-	unsigned long target;
 
 	if (!capable(CAP_NET_ADMIN))
 		return -EPERM;
 
-	target = simple_strtoul(buf, &endp, 0);
+	simple_strtoul(buf, &endp, 0);
 	if (endp == buf)
 		return -EBADMSG;
 

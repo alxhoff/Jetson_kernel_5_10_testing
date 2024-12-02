@@ -29,6 +29,10 @@
 #define SD_APP_OP_COND           41   /* bcr  [31:0] OCR         R3  */
 #define SD_APP_SEND_SCR          51   /* adtc                    R1  */
 
+  /* class 11 */
+#define SD_READ_EXTR_SINGLE      48   /* adtc [31:0]             R1  */
+#define SD_WRITE_EXTR_SINGLE     49   /* adtc [31:0]             R1  */
+
 /* OCR bit definitions */
 #define SD_OCR_S18R		(1 << 24)    /* 1.8V switching request */
 #define SD_ROCR_S18A		SD_OCR_S18R  /* 1.8V switching accepted by card */
@@ -51,15 +55,10 @@
 /*
  * SD_SEND_IF_COND argument format:
  *
- *	[31:14] Reserved (0)
- *	[13:12] SD Express bit fields
+ *	[31:12] Reserved (0)
  *	[11:8] Host Voltage Supply Flags
  *	[7:0] Check Pattern (0xAA)
  */
-#define SD_EXP_1V8_MASK		0x1
-#define SD_EXP_1V2_MASK		0x2
-#define SD_EXP_AVAIL_MASK	(SD_EXP_1V8_MASK | SD_EXP_1V2_MASK)
-#define SD_EXP_SHIFT		12
 
 /*
  * SCR field definitions

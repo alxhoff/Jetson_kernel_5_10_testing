@@ -7,6 +7,7 @@
  * Copyright (c) 2007 Dave Airlie <airlied@linux.ie>
  */
 
+#include "drm/drm_modeset_lock.h"
 #include <linux/module.h>
 #include <linux/mutex.h>
 #include <linux/slab.h>
@@ -308,6 +309,9 @@ static bool drm_client_target_cloned(struct drm_device *dev,
 	can_clone = true;
 	dmt_mode = drm_mode_find_dmt(dev, 1024, 768, 60, false);
 
+	if (!dmt_mode)
+		goto fail;
+
 	for (i = 0; i < connector_count; i++) {
 		if (!enabled[i])
 			continue;
@@ -323,11 +327,13 @@ static bool drm_client_target_cloned(struct drm_device *dev,
 		if (!modes[i])
 			can_clone = false;
 	}
+	kfree(dmt_mode);
 
 	if (can_clone) {
 		DRM_DEBUG_KMS("can clone using 1024x768\n");
 		return true;
 	}
+fail:
 	DRM_INFO("kms: can't enable cloning when we probably wanted to.\n");
 	return false;
 }
@@ -859,6 +865,7 @@ int drm_client_modeset_probe(struct drm_client_dev *client, unsigned int width, 
 				break;
 			}
 
+			kfree(modeset->mode);
 			modeset->mode = drm_mode_duplicate(dev, mode);
 			drm_connector_get(connector);
 			modeset->connectors[modeset->num_connectors++] = connector;
@@ -1181,9 +1188,11 @@ static void drm_client_modeset_dpms_legacy(struct drm_client_dev *client, int dp
 	struct drm_device *dev = client->dev;
 	struct drm_connector *connector;
 	struct drm_mode_set *modeset;
+	struct drm_modeset_acquire_ctx ctx;
 	int j;
+	int ret;
 
-	drm_modeset_lock_all(dev);
+	DRM_MODESET_LOCK_ALL_BEGIN(dev, ctx, 0, ret);
 	drm_client_for_each_modeset(modeset, client) {
 		if (!modeset->crtc->enabled)
 			continue;
@@ -1195,7 +1204,7 @@ static void drm_client_modeset_dpms_legacy(struct drm_client_dev *client, int dp
 				dev->mode_config.dpms_property, dpms_mode);
 		}
 	}
-	drm_modeset_unlock_all(dev);
+	DRM_MODESET_LOCK_ALL_END(dev, ctx, ret);
 }
 
 /**

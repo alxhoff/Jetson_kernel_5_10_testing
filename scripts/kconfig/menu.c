@@ -9,6 +9,7 @@
 #include <string.h>
 
 #include "lkc.h"
+#include "internal.h"
 
 static const char nohelp_text[] = "There is no help available for this option.";
 
@@ -38,17 +39,6 @@ static void prop_warn(struct property *prop, const char *fmt, ...)
 	va_end(ap);
 }
 
-static void file_err(const char *fmt, ...)
-{
-	va_list ap;
-	va_start(ap, fmt);
-	fprintf(stderr, "%s:%d:ERROR: ", current_file->name, current_file->lineno);
-	vfprintf(stderr, fmt, ap);
-	fprintf(stderr, "\n");
-	va_end(ap);
-	exit(1);
-}
-
 void _menu_init(void)
 {
 	current_entry = current_menu = &rootmenu;
@@ -73,56 +63,6 @@ void menu_add_entry(struct symbol *sym)
 		menu_add_symbol(P_SYMBOL, sym, NULL);
 }
 
-struct menu *menu_append_entry(char *prompt)
-{
-	struct menu *menu;
-
-	for (menu = current_menu->list; menu; menu = menu->next) {
-		if (!menu->prompt)
-			continue;
-		if (menu->prompt->type != P_MENU)
-			continue;
-		if (!menu->prompt->text)
-			continue;
-		if (strcmp(menu->prompt->text, prompt))
-			continue;
-		last_entry_ptr = &menu->list;
-		while (*last_entry_ptr)
-			last_entry_ptr = &((*last_entry_ptr)->next);
-		current_entry = menu;
-		current_menu = menu;
-		return current_menu;
-	}
-
-	file_err("Existing menu \"%s\" not found; cannot append to it", prompt);
-	exit(1);
-}
-
-struct menu *menu_append_choice(char *prompt)
-{
-	struct menu *menu;
-
-	for (menu = current_menu->list; menu; menu = menu->next) {
-		if (!menu->prompt)
-			continue;
-		if (menu->prompt->type != P_PROMPT)
-			continue;
-		if (!menu->prompt->text)
-			continue;
-		if (strcmp(menu->prompt->text, prompt))
-			continue;
-		last_entry_ptr = &menu->list;
-		while (*last_entry_ptr)
-			last_entry_ptr = &((*last_entry_ptr)->next);
-		current_entry = menu;
-		current_menu = menu;
-		return current_menu;
-	}
-
-	file_err("Existing menu \"%s\" not found; cannot append to it", prompt);
-	exit(1);
-}
-
 struct menu *menu_add_menu(void)
 {
 	last_entry_ptr = &current_entry->list;
@@ -133,8 +73,6 @@ struct menu *menu_add_menu(void)
 void menu_end_menu(void)
 {
 	last_entry_ptr = &current_menu->next;
-	while (*last_entry_ptr)
-		last_entry_ptr = &((*last_entry_ptr)->next);
 	current_menu = current_menu->parent;
 }
 
@@ -272,28 +210,6 @@ void menu_add_expr(enum prop_type type, struct expr *expr, struct expr *dep)
 void menu_add_symbol(enum prop_type type, struct symbol *sym, struct expr *dep)
 {
 	menu_add_prop(type, expr_alloc_symbol(sym), dep);
-}
-
-void menu_add_option_modules(void)
-{
-	if (modules_sym)
-		zconf_error("symbol '%s' redefines option 'modules' already defined by symbol '%s'",
-			    current_entry->sym->name, modules_sym->name);
-	modules_sym = current_entry->sym;
-}
-
-void menu_add_option_defconfig_list(void)
-{
-	if (!sym_defconfig_list)
-		sym_defconfig_list = current_entry->sym;
-	else if (sym_defconfig_list != current_entry->sym)
-		zconf_error("trying to redefine defconfig symbol");
-	sym_defconfig_list->flags |= SYMBOL_NO_WRITE;
-}
-
-void menu_add_option_allnoconfig_y(void)
-{
-	current_entry->sym->flags |= SYMBOL_ALLNOCONFIG_Y;
 }
 
 static int menu_validate_number(struct symbol *sym, struct symbol *sym2)

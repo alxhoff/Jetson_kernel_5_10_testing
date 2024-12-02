@@ -71,7 +71,6 @@ struct regulator_dev;
  *             in a sleep/standby state. This mode is likely to be
  *             the most noisy and may not be able to handle fast load
  *             switching.
- *  OFF        Regulator turn off completely.
  *
  * NOTE: Most regulators will only support a subset of these modes. Some
  * will only just support NORMAL.
@@ -84,20 +83,6 @@ struct regulator_dev;
 #define REGULATOR_MODE_NORMAL			0x2
 #define REGULATOR_MODE_IDLE			0x4
 #define REGULATOR_MODE_STANDBY			0x8
-#define REGULATOR_MODE_OFF			0x10
-
-/*
- * Regulator control modes.
- *
- * Regulators can be control through i2c or PWM or any other interface.
- * The control mode provides the way to control the regulator.
- *
- *  Mode       Description
- *  I2C        Regulator can be control through I2C interface.
- *  PWM        Regulator can be control through PWM interface.
- */
-#define REGULATOR_CONTROL_MODE_I2C		0x1
-#define REGULATOR_CONTROL_MODE_PWM		0x2
 
 /*
  * Regulator notifier events.
@@ -117,10 +102,6 @@ struct regulator_dev;
  *                      Data passed is old voltage cast to (void *).
  * PRE_DISABLE    Regulator is about to be disabled
  * ABORT_DISABLE  Regulator disable failed for some reason
- * PRE_ENABLE     Regulator is to be enabled
- * ENABLE         Regulator was enabled
- * OUT_PRECHANGE  Regulator is enabled and its voltage is to be changed
- * OUT_POSTCHANGE Regulator is enabled and its voltage was changed
  *
  * NOTE: These events can be OR'ed together when passed into handler.
  */
@@ -138,9 +119,17 @@ struct regulator_dev;
 #define REGULATOR_EVENT_PRE_DISABLE		0x400
 #define REGULATOR_EVENT_ABORT_DISABLE		0x800
 #define REGULATOR_EVENT_ENABLE			0x1000
-#define REGULATOR_EVENT_PRE_ENABLE		0x2000
-#define REGULATOR_EVENT_OUT_PRECHANGE		0x4000
-#define REGULATOR_EVENT_OUT_POSTCHANGE		0x8000
+/*
+ * Following notifications should be emitted only if detected condition
+ * is such that the HW is likely to still be working but consumers should
+ * take a recovery action to prevent problems esacalating into errors.
+ */
+#define REGULATOR_EVENT_UNDER_VOLTAGE_WARN	0x2000
+#define REGULATOR_EVENT_OVER_CURRENT_WARN	0x4000
+#define REGULATOR_EVENT_OVER_VOLTAGE_WARN	0x8000
+#define REGULATOR_EVENT_OVER_TEMP_WARN		0x10000
+#define REGULATOR_EVENT_WARN_MASK		0x1E000
+
 /*
  * Regulator errors that can be queried using regulator_get_error_flags
  *
@@ -159,6 +148,10 @@ struct regulator_dev;
 #define REGULATOR_ERROR_FAIL			BIT(4)
 #define REGULATOR_ERROR_OVER_TEMP		BIT(5)
 
+#define REGULATOR_ERROR_UNDER_VOLTAGE_WARN	BIT(6)
+#define REGULATOR_ERROR_OVER_CURRENT_WARN	BIT(7)
+#define REGULATOR_ERROR_OVER_VOLTAGE_WARN	BIT(8)
+#define REGULATOR_ERROR_OVER_TEMP_WARN		BIT(9)
 
 /**
  * struct pre_voltage_change_data - Data sent with PRE_VOLTAGE_CHANGE event
@@ -229,17 +222,12 @@ void regulator_bulk_unregister_supply_alias(struct device *dev,
 int devm_regulator_register_supply_alias(struct device *dev, const char *id,
 					 struct device *alias_dev,
 					 const char *alias_id);
-void devm_regulator_unregister_supply_alias(struct device *dev,
-					    const char *id);
 
 int devm_regulator_bulk_register_supply_alias(struct device *dev,
 					      const char *const *id,
 					      struct device *alias_dev,
 					      const char *const *alias_id,
 					      int num_id);
-void devm_regulator_bulk_unregister_supply_alias(struct device *dev,
-						 const char *const *id,
-						 int num_id);
 
 /* regulator output control and status */
 int __must_check regulator_enable(struct regulator *regulator);
@@ -269,18 +257,13 @@ unsigned int regulator_get_linear_step(struct regulator *regulator);
 int regulator_set_voltage(struct regulator *regulator, int min_uV, int max_uV);
 int regulator_set_voltage_time(struct regulator *regulator,
 			       int old_uV, int new_uV);
-int regulator_set_sleep_voltage(struct regulator *regulator,
-				int min_uV, int max_uV);
 int regulator_get_voltage(struct regulator *regulator);
-int regulator_get_constraint_voltages(struct regulator *regulator,
-	int *min_uV, int *max_uV);
 int regulator_sync_voltage(struct regulator *regulator);
 int regulator_set_current_limit(struct regulator *regulator,
 			       int min_uA, int max_uA);
 int regulator_get_current_limit(struct regulator *regulator);
 
 int regulator_set_mode(struct regulator *regulator, unsigned int mode);
-int regulator_set_sleep_mode(struct regulator *regulator, unsigned int mode);
 unsigned int regulator_get_mode(struct regulator *regulator);
 int regulator_get_error_flags(struct regulator *regulator,
 				unsigned int *flags);
@@ -294,9 +277,6 @@ int regulator_get_hardware_vsel_register(struct regulator *regulator,
 					 unsigned *vsel_mask);
 int regulator_list_hardware_vsel(struct regulator *regulator,
 				 unsigned selector);
-
-int regulator_set_control_mode(struct regulator *regulator, unsigned int mode);
-unsigned int regulator_get_control_mode(struct regulator *regulator);
 
 /* regulator notifier block */
 int regulator_register_notifier(struct regulator *regulator,
@@ -423,11 +403,6 @@ static inline int devm_regulator_register_supply_alias(struct device *dev,
 	return 0;
 }
 
-static inline void devm_regulator_unregister_supply_alias(struct device *dev,
-							  const char *id)
-{
-}
-
 static inline int devm_regulator_bulk_register_supply_alias(struct device *dev,
 						const char *const *id,
 						struct device *alias_dev,
@@ -435,11 +410,6 @@ static inline int devm_regulator_bulk_register_supply_alias(struct device *dev,
 						int num_id)
 {
 	return 0;
-}
-
-static inline void devm_regulator_bulk_unregister_supply_alias(
-	struct device *dev, const char *const *id, int num_id)
-{
 }
 
 static inline int regulator_enable(struct regulator *regulator)
@@ -592,18 +562,6 @@ static inline int regulator_list_hardware_vsel(struct regulator *regulator,
 					       unsigned selector)
 {
 	return -EOPNOTSUPP;
-}
-
-static inline int regulator_set_control_mode(struct regulator *regulator,
-		unsigned int mode)
-{
-	return 0;
-}
-
-static inline unsigned int regulator_get_control_mode(
-		struct regulator *regulator)
-{
-	return REGULATOR_CONTROL_MODE_I2C;
 }
 
 static inline int regulator_register_notifier(struct regulator *regulator,

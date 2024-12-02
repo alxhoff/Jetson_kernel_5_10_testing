@@ -141,6 +141,8 @@ static void mdp4_destroy(struct msm_kms *kms)
 	if (mdp4_kms->rpm_enabled)
 		pm_runtime_disable(dev);
 
+	mdp_kms_destroy(&mdp4_kms->base);
+
 	kfree(mdp4_kms);
 }
 
@@ -221,6 +223,7 @@ static int mdp4_modeset_init_intf(struct mdp4_kms *mdp4_kms,
 		encoder = mdp4_lcdc_encoder_init(dev, panel_node);
 		if (IS_ERR(encoder)) {
 			DRM_DEV_ERROR(dev->dev, "failed to construct LCDC encoder\n");
+			of_node_put(panel_node);
 			return PTR_ERR(encoder);
 		}
 
@@ -230,6 +233,7 @@ static int mdp4_modeset_init_intf(struct mdp4_kms *mdp4_kms,
 		connector = mdp4_lvds_connector_init(dev, panel_node, encoder);
 		if (IS_ERR(connector)) {
 			DRM_DEV_ERROR(dev->dev, "failed to initialize LVDS connector\n");
+			of_node_put(panel_node);
 			return PTR_ERR(connector);
 		}
 
@@ -411,7 +415,11 @@ struct msm_kms *mdp4_kms_init(struct drm_device *dev)
 		goto fail;
 	}
 
-	mdp_kms_init(&mdp4_kms->base, &kms_funcs);
+	ret = mdp_kms_init(&mdp4_kms->base, &kms_funcs);
+	if (ret) {
+		DRM_DEV_ERROR(dev->dev, "failed to init kms\n");
+		goto fail;
+	}
 
 	priv->kms = &mdp4_kms->base.base;
 	kms = priv->kms;

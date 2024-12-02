@@ -135,13 +135,11 @@ static void hci_conn_cleanup(struct hci_conn *conn)
 			hdev->notify(hdev, HCI_NOTIFY_CONN_DEL);
 	}
 
-	hci_conn_del_sysfs(conn);
-
 	debugfs_remove_recursive(conn->debugfs);
 
-	hci_dev_put(hdev);
+	hci_conn_del_sysfs(conn);
 
-	hci_conn_put(conn);
+	hci_dev_put(hdev);
 }
 
 static void le_scan_cleanup(struct work_struct *work)
@@ -203,6 +201,23 @@ static void hci_acl_create_connection(struct hci_conn *conn)
 
 	BT_DBG("hcon %p", conn);
 
+	/* Many controllers disallow HCI Create Connection while it is doing
+	 * HCI Inquiry. So we cancel the Inquiry first before issuing HCI Create
+	 * Connection. This may cause the MGMT discovering state to become false
+	 * without user space's request but it is okay since the MGMT Discovery
+	 * APIs do not promise that discovery should be done forever. Instead,
+	 * the user space monitors the status of MGMT discovering and it may
+	 * request for discovery again when this flag becomes false.
+	 */
+	if (test_bit(HCI_INQUIRY, &hdev->flags)) {
+		/* Put this connection to "pending" state so that it will be
+		 * executed after the inquiry cancel command complete event.
+		 */
+		conn->state = BT_CONNECT2;
+		hci_send_cmd(hdev, HCI_OP_INQUIRY_CANCEL, 0, NULL);
+		return;
+	}
+
 	conn->state = BT_CONNECT;
 	conn->out = true;
 	conn->role = HCI_ROLE_MASTER;
@@ -240,7 +255,7 @@ int hci_disconnect(struct hci_conn *conn, __u8 reason)
 {
 	BT_DBG("hcon %p", conn);
 
-	/* When we are master of an established connection and it enters
+	/* When we are central of an established connection and it enters
 	 * the disconnect timeout, then go ahead and try to read the
 	 * current clock offset.  Processing of the result is done
 	 * within the event handling and hci_clock_offset_evt function.
@@ -276,6 +291,20 @@ static void hci_add_sco(struct hci_conn *conn, __u16 handle)
 	hci_send_cmd(hdev, HCI_OP_ADD_SCO, sizeof(cp), &cp);
 }
 
+static bool find_next_esco_param(struct hci_conn *conn,
+				 const struct sco_param *esco_param, int size)
+{
+	for (; conn->attempt <= size; conn->attempt++) {
+		if (lmp_esco_2m_capable(conn->link) ||
+		    (esco_param[conn->attempt - 1].pkt_type & ESCO_2EV3))
+			break;
+		BT_DBG("hcon %p skipped attempt %d, eSCO 2M not supported",
+		       conn, conn->attempt);
+	}
+
+	return conn->attempt <= size;
+}
+
 bool hci_setup_sync(struct hci_conn *conn, __u16 handle)
 {
 	struct hci_dev *hdev = conn->hdev;
@@ -297,13 +326,15 @@ bool hci_setup_sync(struct hci_conn *conn, __u16 handle)
 
 	switch (conn->setting & SCO_AIRMODE_MASK) {
 	case SCO_AIRMODE_TRANSP:
-		if (conn->attempt > ARRAY_SIZE(esco_param_msbc))
+		if (!find_next_esco_param(conn, esco_param_msbc,
+					  ARRAY_SIZE(esco_param_msbc)))
 			return false;
 		param = &esco_param_msbc[conn->attempt - 1];
 		break;
 	case SCO_AIRMODE_CVSD:
 		if (lmp_esco_capable(conn->link)) {
-			if (conn->attempt > ARRAY_SIZE(esco_param_cvsd))
+			if (!find_next_esco_param(conn, esco_param_cvsd,
+						  ARRAY_SIZE(esco_param_cvsd)))
 				return false;
 			param = &esco_param_cvsd[conn->attempt - 1];
 		} else {
@@ -727,7 +758,7 @@ void hci_le_conn_failed(struct hci_conn *conn, u8 status)
 	conn->state = BT_CLOSED;
 
 	/* If the status indicates successful cancellation of
-	 * the attempt (i.e. Unkown Connection Id) there's no point of
+	 * the attempt (i.e. Unknown Connection Id) there's no point of
 	 * notifying failure since we'll go back to keep trying to
 	 * connect. The only exception is explicit connect requests
 	 * where a timeout + cancel does indicate an actual failure.
@@ -740,6 +771,16 @@ void hci_le_conn_failed(struct hci_conn *conn, u8 status)
 	hci_connect_cfm(conn, status);
 
 	hci_conn_del(conn);
+
+	/* The suspend notifier is waiting for all devices to disconnect and an
+	 * LE connect cancel will result in an hci_le_conn_failed. Once the last
+	 * connection is deleted, we should also wake the suspend queue to
+	 * complete suspend operations.
+	 */
+	if (list_empty(&hdev->conn_hash.list) &&
+	    test_and_clear_bit(SUSPEND_DISCONNECTING, hdev->suspend_tasks)) {
+		wake_up(&hdev->suspend_wait_q);
+	}
 
 	/* Since we may have temporarily stopped the background scanning in
 	 * favor of connection establishment, we should restart it.
@@ -759,6 +800,9 @@ static void create_le_conn_complete(struct hci_dev *hdev, u8 status, u16 opcode)
 	hci_dev_lock(hdev);
 
 	conn = hci_lookup_le_connect(hdev);
+
+	if (hdev->adv_instance_cnt)
+		hci_req_resume_adv_instances(hdev);
 
 	if (!status) {
 		hci_connect_le_scan_cleanup(conn);
@@ -1065,16 +1109,17 @@ struct hci_conn *hci_connect_le(struct hci_dev *hdev, bdaddr_t *dst,
 
 	hci_req_init(&req, hdev);
 
-	/* Disable advertising if we're active. For master role
+	/* Disable advertising if we're active. For central role
 	 * connections most controllers will refuse to connect if
-	 * advertising is enabled, and for slave role connections we
+	 * advertising is enabled, and for peripheral role connections we
 	 * anyway have to disable it in order to start directed
-	 * advertising.
+	 * advertising. Any registered advertisements will be
+	 * re-enabled after the connection attempt is finished.
 	 */
 	if (hci_dev_test_flag(hdev, HCI_LE_ADV))
-		 __hci_req_disable_advertising(&req);
+		__hci_req_pause_adv_instances(&req);
 
-	/* If requested to connect as slave use directed advertising */
+	/* If requested to connect as peripheral use directed advertising */
 	if (conn->role == HCI_ROLE_SLAVE) {
 		/* If we're active scanning most controllers are unable
 		 * to initiate advertising. Simply reject the attempt.
@@ -1120,6 +1165,10 @@ create_conn:
 	err = hci_req_run(&req, create_le_conn_complete);
 	if (err) {
 		hci_conn_del(conn);
+
+		if (hdev->adv_instance_cnt)
+			hci_req_resume_adv_instances(hdev);
+
 		return ERR_PTR(err);
 	}
 
@@ -1247,6 +1296,15 @@ struct hci_conn *hci_connect_acl(struct hci_dev *hdev, bdaddr_t *dst,
 			return ERR_PTR(-ECONNREFUSED);
 
 		return ERR_PTR(-EOPNOTSUPP);
+	}
+
+	/* Reject outgoing connection to device with same BD ADDR against
+	 * CVE-2020-26555
+	 */
+	if (!bacmp(&hdev->bdaddr, dst)) {
+		bt_dev_dbg(hdev, "Reject connection with same BD_ADDR %pMR\n",
+			   dst);
+		return ERR_PTR(-ECONNREFUSED);
 	}
 
 	acl = hci_conn_hash_lookup_ba(hdev, ACL_LINK, dst);
@@ -1378,12 +1436,10 @@ static int hci_conn_auth(struct hci_conn *conn, __u8 sec_level, __u8 auth_type)
 		hci_send_cmd(conn->hdev, HCI_OP_AUTH_REQUESTED,
 			     sizeof(cp), &cp);
 
-		/* If we're already encrypted set the REAUTH_PEND flag,
-		 * otherwise set the ENCRYPT_PEND.
+		/* Set the ENCRYPT_PEND to trigger encryption after
+		 * authentication.
 		 */
-		if (test_bit(HCI_CONN_ENCRYPT, &conn->flags))
-			set_bit(HCI_CONN_REAUTH_PEND, &conn->flags);
-		else
+		if (!test_bit(HCI_CONN_ENCRYPT, &conn->flags))
 			set_bit(HCI_CONN_ENCRYPT_PEND, &conn->flags);
 	}
 
@@ -1426,34 +1482,41 @@ int hci_conn_security(struct hci_conn *conn, __u8 sec_level, __u8 auth_type,
 	if (!test_bit(HCI_CONN_AUTH, &conn->flags))
 		goto auth;
 
-	/* An authenticated FIPS approved combination key has sufficient
-	 * security for security level 4. */
-	if (conn->key_type == HCI_LK_AUTH_COMBINATION_P256 &&
-	    sec_level == BT_SECURITY_FIPS)
-		goto encrypt;
-
-	/* An authenticated combination key has sufficient security for
-	   security level 3. */
-	if ((conn->key_type == HCI_LK_AUTH_COMBINATION_P192 ||
-	     conn->key_type == HCI_LK_AUTH_COMBINATION_P256) &&
-	    sec_level == BT_SECURITY_HIGH)
-		goto encrypt;
-
-	/* An unauthenticated combination key has sufficient security for
-	   security level 1 and 2. */
-	if ((conn->key_type == HCI_LK_UNAUTH_COMBINATION_P192 ||
-	     conn->key_type == HCI_LK_UNAUTH_COMBINATION_P256) &&
-	    (sec_level == BT_SECURITY_MEDIUM || sec_level == BT_SECURITY_LOW))
-		goto encrypt;
-
-	/* A combination key has always sufficient security for the security
-	   levels 1 or 2. High security level requires the combination key
-	   is generated using maximum PIN code length (16).
-	   For pre 2.1 units. */
-	if (conn->key_type == HCI_LK_COMBINATION &&
-	    (sec_level == BT_SECURITY_MEDIUM || sec_level == BT_SECURITY_LOW ||
-	     conn->pin_length == 16))
-		goto encrypt;
+	switch (conn->key_type) {
+	case HCI_LK_AUTH_COMBINATION_P256:
+		/* An authenticated FIPS approved combination key has
+		 * sufficient security for security level 4 or lower.
+		 */
+		if (sec_level <= BT_SECURITY_FIPS)
+			goto encrypt;
+		break;
+	case HCI_LK_AUTH_COMBINATION_P192:
+		/* An authenticated combination key has sufficient security for
+		 * security level 3 or lower.
+		 */
+		if (sec_level <= BT_SECURITY_HIGH)
+			goto encrypt;
+		break;
+	case HCI_LK_UNAUTH_COMBINATION_P192:
+	case HCI_LK_UNAUTH_COMBINATION_P256:
+		/* An unauthenticated combination key has sufficient security
+		 * for security level 2 or lower.
+		 */
+		if (sec_level <= BT_SECURITY_MEDIUM)
+			goto encrypt;
+		break;
+	case HCI_LK_COMBINATION:
+		/* A combination key has always sufficient security for the
+		 * security levels 2 or lower. High security level requires the
+		 * combination key is generated using maximum PIN code length
+		 * (16). For pre 2.1 units.
+		 */
+		if (sec_level <= BT_SECURITY_MEDIUM || conn->pin_length == 16)
+			goto encrypt;
+		break;
+	default:
+		break;
+	}
 
 auth:
 	if (test_bit(HCI_CONN_ENCRYPT_PEND, &conn->flags))
@@ -1793,7 +1856,7 @@ u32 hci_conn_get_phy(struct hci_conn *conn)
 
 	/* BLUETOOTH CORE SPECIFICATION Version 5.2 | Vol 2, Part B page 471:
 	 * Table 6.2: Packets defined for synchronous, asynchronous, and
-	 * CSB logical transport types.
+	 * CPB logical transport types.
 	 */
 	switch (conn->type) {
 	case SCO_LINK:

@@ -1,320 +1,376 @@
+// SPDX-License-Identifier: GPL-2.0+
 /*
- * ECDSA generic algorithm
- *
- * Copyright (c) 2017-2020, NVIDIA Corporation. All Rights Reserved.
- *
- * This program is free software; you can redistribute it and/or modify it
- * under the terms of the GNU General Public License as published by the Free
- * Software Foundation; either version 2 of the License, or (at your option)
- * any later version.
- *
+ * Copyright (c) 2021 IBM Corporation
  */
 
 #include <linux/module.h>
-#include <linux/scatterlist.h>
-#include <crypto/rng.h>
 #include <crypto/internal/akcipher.h>
 #include <crypto/akcipher.h>
-#include <crypto/ecdsa.h>
+#include <crypto/ecdh.h>
+#include <linux/asn1_decoder.h>
+#include <linux/scatterlist.h>
 
 #include "ecc.h"
+#include "ecdsasignature.asn1.h"
 
-struct ecdsa_ctx {
+struct ecc_ctx {
 	unsigned int curve_id;
-	unsigned int ndigits;
-	u64 private_key[ECC_MAX_DIGITS];
-	u64 public_key[2 * ECC_MAX_DIGITS];
+	const struct ecc_curve *curve;
+
+	bool pub_key_set;
+	u64 x[ECC_MAX_DIGITS]; /* pub key x and y coordinates */
+	u64 y[ECC_MAX_DIGITS];
+	struct ecc_point pub_key;
 };
 
-static inline struct ecdsa_ctx *ecdsa_get_ctx(struct crypto_akcipher *tfm)
-{
-	return akcipher_tfm_ctx(tfm);
-}
+struct ecdsa_signature_ctx {
+	const struct ecc_curve *curve;
+	u64 r[ECC_MAX_DIGITS];
+	u64 s[ECC_MAX_DIGITS];
+};
 
-int ecdsa_sign(struct akcipher_request *req)
+/*
+ * Get the r and s components of a signature from the X509 certificate.
+ */
+static int ecdsa_get_signature_rs(u64 *dest, size_t hdrlen, unsigned char tag,
+				  const void *value, size_t vlen, unsigned int ndigits)
 {
-	struct crypto_akcipher *tfm = crypto_akcipher_reqtfm(req);
-	struct ecdsa_ctx *ctx = ecdsa_get_ctx(tfm);
-	unsigned int ndigits = ctx->ndigits;
-	unsigned int nbytes = ndigits << ECC_DIGITS_TO_BYTES_SHIFT;
-	unsigned int curve_id = ctx->curve_id;
-	const struct ecc_curve *curve = ecc_get_curve(curve_id);
-	struct ecc_point *x1y1 = NULL;
-	u64 z[ndigits], d[ndigits];
-	u64 k[ndigits], k_inv[ndigits];
-	u64 r[ndigits], s[ndigits];
-	u64 dr[ndigits], zdr[ndigits];
-	u8 *r_ptr, *s_ptr;
-	int err;
+	size_t keylen = ndigits * sizeof(u64);
+	ssize_t diff = vlen - keylen;
+	const char *d = value;
+	u8 rs[ECC_MAX_BYTES];
 
-	if (req->dst_len < 2 * nbytes) {
-		req->dst_len = 2 * nbytes;
+	if (!value || !vlen)
 		return -EINVAL;
+
+	/* diff = 0: 'value' has exacly the right size
+	 * diff > 0: 'value' has too many bytes; one leading zero is allowed that
+	 *           makes the value a positive integer; error on more
+	 * diff < 0: 'value' is missing leading zeros, which we add
+	 */
+	if (diff > 0) {
+		/* skip over leading zeros that make 'value' a positive int */
+		if (*d == 0) {
+			vlen -= 1;
+			diff--;
+			d++;
+		}
+		if (diff)
+			return -EINVAL;
+	}
+	if (-diff >= keylen)
+		return -EINVAL;
+
+	if (diff) {
+		/* leading zeros not given in 'value' */
+		memset(rs, 0, -diff);
 	}
 
-	if (!curve)
-		return -EINVAL;
+	memcpy(&rs[-diff], d, vlen);
 
-	ecdsa_parse_msg_hash(req, z, ndigits);
+	ecc_swap_digits((u64 *)rs, dest, ndigits);
 
-	/* d */
-	vli_set(d, (const u64 *)ctx->private_key, ndigits);
-
-	/* k */
-	err = ecdsa_get_rnd_bytes((u8 *)k, nbytes);
-	if (err)
-		return err;
-
-#if defined(CONFIG_CRYPTO_MANAGER2)
-	if (req->info)
-		vli_copy_from_buf(k, ndigits, req->info, nbytes);
-#endif
-
-	x1y1 = ecc_alloc_point(ndigits);
-	if (!x1y1)
-		return -ENOMEM;
-
-	/* (x1, y1) = k x G */
-	ecc_point_mult(x1y1, &curve->g, k, NULL, curve, ndigits);
-
-	/* r = x1 mod n */
-	vli_mod(r, x1y1->x, curve->n, ndigits);
-
-	/* k^-1 */
-	vli_mod_inv(k_inv, k, curve->n, ndigits);
-
-	/* d . r mod n */
-	vli_mod_mult(dr, d, r, curve->n, ndigits);
-
-	/* z + dr mod n */
-	vli_mod_add(zdr, z, dr, curve->n, ndigits);
-
-	/* k^-1 . ( z + dr) mod n */
-	vli_mod_mult(s, k_inv, zdr, curve->n, ndigits);
-
-	/* write signature (r,s) in dst */
-	r_ptr = sg_virt(req->dst);
-	s_ptr = (u8 *)sg_virt(req->dst) + nbytes;
-
-	vli_copy_to_buf(r_ptr, nbytes, r, ndigits);
-	vli_copy_to_buf(s_ptr, nbytes, s, ndigits);
-
-	req->dst_len = 2 * nbytes;
-
-	ecc_free_point(x1y1);
 	return 0;
 }
 
-int ecdsa_verify(struct akcipher_request *req)
+int ecdsa_get_signature_r(void *context, size_t hdrlen, unsigned char tag,
+			  const void *value, size_t vlen)
+{
+	struct ecdsa_signature_ctx *sig = context;
+
+	return ecdsa_get_signature_rs(sig->r, hdrlen, tag, value, vlen,
+				      sig->curve->g.ndigits);
+}
+
+int ecdsa_get_signature_s(void *context, size_t hdrlen, unsigned char tag,
+			  const void *value, size_t vlen)
+{
+	struct ecdsa_signature_ctx *sig = context;
+
+	return ecdsa_get_signature_rs(sig->s, hdrlen, tag, value, vlen,
+				      sig->curve->g.ndigits);
+}
+
+static int _ecdsa_verify(struct ecc_ctx *ctx, const u64 *hash, const u64 *r, const u64 *s)
+{
+	const struct ecc_curve *curve = ctx->curve;
+	unsigned int ndigits = curve->g.ndigits;
+	u64 s1[ECC_MAX_DIGITS];
+	u64 u1[ECC_MAX_DIGITS];
+	u64 u2[ECC_MAX_DIGITS];
+	u64 x1[ECC_MAX_DIGITS];
+	u64 y1[ECC_MAX_DIGITS];
+	struct ecc_point res = ECC_POINT_INIT(x1, y1, ndigits);
+
+	/* 0 < r < n  and 0 < s < n */
+	if (vli_is_zero(r, ndigits) || vli_cmp(r, curve->n, ndigits) >= 0 ||
+	    vli_is_zero(s, ndigits) || vli_cmp(s, curve->n, ndigits) >= 0)
+		return -EBADMSG;
+
+	/* hash is given */
+	pr_devel("hash : %016llx %016llx ... %016llx\n",
+		 hash[ndigits - 1], hash[ndigits - 2], hash[0]);
+
+	/* s1 = (s^-1) mod n */
+	vli_mod_inv(s1, s, curve->n, ndigits);
+	/* u1 = (hash * s1) mod n */
+	vli_mod_mult_slow(u1, hash, s1, curve->n, ndigits);
+	/* u2 = (r * s1) mod n */
+	vli_mod_mult_slow(u2, r, s1, curve->n, ndigits);
+	/* res = u1*G + u2 * pub_key */
+	ecc_point_mult_shamir(&res, u1, &curve->g, u2, &ctx->pub_key, curve);
+
+	/* res.x = res.x mod n (if res.x > order) */
+	if (unlikely(vli_cmp(res.x, curve->n, ndigits) == 1))
+		/* faster alternative for NIST p384, p256 & p192 */
+		vli_sub(res.x, res.x, curve->n, ndigits);
+
+	if (!vli_cmp(res.x, r, ndigits))
+		return 0;
+
+	return -EKEYREJECTED;
+}
+
+/*
+ * Verify an ECDSA signature.
+ */
+static int ecdsa_verify(struct akcipher_request *req)
 {
 	struct crypto_akcipher *tfm = crypto_akcipher_reqtfm(req);
-	struct ecdsa_ctx *ctx = ecdsa_get_ctx(tfm);
-	unsigned int ndigits = ctx->ndigits;
-	unsigned int nbytes = ndigits << ECC_DIGITS_TO_BYTES_SHIFT;
-	unsigned int curve_id = ctx->curve_id;
-	const struct ecc_curve *curve = ecc_get_curve(curve_id);
-	struct ecc_point *x1y1 = NULL, *x2y2 = NULL, *Q = NULL;
-	u64 r[ndigits], s[ndigits], v[ndigits];
-	u64 z[ndigits], w[ndigits];
-	u64 u1[ndigits], u2[ndigits];
-	u64 x1[ndigits], x2[ndigits];
-	u64 y1[ndigits], y2[ndigits];
-	u64 *ctx_qx, *ctx_qy;
+	struct ecc_ctx *ctx = akcipher_tfm_ctx(tfm);
+	size_t keylen = ctx->curve->g.ndigits * sizeof(u64);
+	struct ecdsa_signature_ctx sig_ctx = {
+		.curve = ctx->curve,
+	};
+	u8 rawhash[ECC_MAX_BYTES];
+	u64 hash[ECC_MAX_DIGITS];
+	unsigned char *buffer;
+	ssize_t diff;
 	int ret;
 
-	if (!curve)
+	if (unlikely(!ctx->pub_key_set))
 		return -EINVAL;
 
-	x1y1 = ecc_alloc_point(ndigits);
-	x2y2 = ecc_alloc_point(ndigits);
-	Q = ecc_alloc_point(ndigits);
-	if (!x1y1 || !x2y2 || !Q) {
-		ret = -ENOMEM;
-		goto exit;
+	buffer = kmalloc(req->src_len + req->dst_len, GFP_KERNEL);
+	if (!buffer)
+		return -ENOMEM;
+
+	sg_pcopy_to_buffer(req->src,
+		sg_nents_for_len(req->src, req->src_len + req->dst_len),
+		buffer, req->src_len + req->dst_len, 0);
+
+	ret = asn1_ber_decoder(&ecdsasignature_decoder, &sig_ctx,
+			       buffer, req->src_len);
+	if (ret < 0)
+		goto error;
+
+	/* if the hash is shorter then we will add leading zeros to fit to ndigits */
+	diff = keylen - req->dst_len;
+	if (diff >= 0) {
+		if (diff)
+			memset(rawhash, 0, diff);
+		memcpy(&rawhash[diff], buffer + req->src_len, req->dst_len);
+	} else if (diff < 0) {
+		/* given hash is longer, we take the left-most bytes */
+		memcpy(&rawhash, buffer + req->src_len, keylen);
 	}
 
-	ecdsa_parse_msg_hash(req, z, ndigits);
+	ecc_swap_digits((u64 *)rawhash, hash, ctx->curve->g.ndigits);
 
-	/* Signature r,s */
-	vli_copy_from_buf(r, ndigits, sg_virt(&req->src[1]), nbytes);
-	vli_copy_from_buf(s, ndigits, sg_virt(&req->src[2]), nbytes);
+	ret = _ecdsa_verify(ctx, hash, sig_ctx.r, sig_ctx.s);
 
-	/* w = s^-1 mod n */
-	vli_mod_inv(w, s, curve->n, ndigits);
+error:
+	kfree(buffer);
 
-	/* u1 = zw mod n */
-	vli_mod_mult(u1, z, w, curve->n, ndigits);
-
-	/* u2 = rw mod n */
-	vli_mod_mult(u2, r, w, curve->n, ndigits);
-
-	/* u1 . G */
-	ecc_point_mult(x1y1, &curve->g, u1, NULL, curve, ndigits);
-
-	/* Q=(Qx,Qy) */
-	ctx_qx = ctx->public_key;
-	ctx_qy = ctx_qx + ECC_MAX_DIGITS;
-	vli_set(Q->x, ctx_qx, ndigits);
-	vli_set(Q->y, ctx_qy, ndigits);
-
-	/* u2 x Q */
-	ecc_point_mult(x2y2, Q, u2, NULL, curve, ndigits);
-
-	vli_set(x1, x1y1->x, ndigits);
-	vli_set(y1, x1y1->y, ndigits);
-	vli_set(x2, x2y2->x, ndigits);
-	vli_set(y2, x2y2->y, ndigits);
-
-	/* x1y1 + x2y2 => P + Q; P + Q in x2 y2 */
-	ecc_point_add(x1, y1, x2, y2, curve->p, ndigits);
-
-	/* v = x mod n */
-	vli_mod(v, x2, curve->n, ndigits);
-
-	/* validate signature */
-	ret = vli_cmp(v, r, ndigits) == 0 ? 0 : -EBADMSG;
- exit:
-	ecc_free_point(x1y1);
-	ecc_free_point(x2y2);
-	ecc_free_point(Q);
 	return ret;
 }
 
-int ecdsa_dummy_enc(struct akcipher_request *req)
+static int ecdsa_ecc_ctx_init(struct ecc_ctx *ctx, unsigned int curve_id)
 {
-	return -EINVAL;
+	ctx->curve_id = curve_id;
+	ctx->curve = ecc_get_curve(curve_id);
+	if (!ctx->curve)
+		return -EINVAL;
+
+	return 0;
 }
 
-int ecdsa_dummy_dec(struct akcipher_request *req)
+
+static void ecdsa_ecc_ctx_deinit(struct ecc_ctx *ctx)
 {
-	return -EINVAL;
+	ctx->pub_key_set = false;
 }
 
-int ecdsa_set_pub_key(struct crypto_akcipher *tfm, const void *key,
-		      unsigned int keylen)
+static int ecdsa_ecc_ctx_reset(struct ecc_ctx *ctx)
 {
-	struct ecdsa_ctx *ctx = ecdsa_get_ctx(tfm);
-	struct ecdsa params;
+	unsigned int curve_id = ctx->curve_id;
+	int ret;
+
+	ecdsa_ecc_ctx_deinit(ctx);
+	ret = ecdsa_ecc_ctx_init(ctx, curve_id);
+	if (ret == 0)
+		ctx->pub_key = ECC_POINT_INIT(ctx->x, ctx->y,
+					      ctx->curve->g.ndigits);
+	return ret;
+}
+
+/*
+ * Set the public key given the raw uncompressed key data from an X509
+ * certificate. The key data contain the concatenated X and Y coordinates of
+ * the public key.
+ */
+static int ecdsa_set_pub_key(struct crypto_akcipher *tfm, const void *key, unsigned int keylen)
+{
+	struct ecc_ctx *ctx = akcipher_tfm_ctx(tfm);
+	const unsigned char *d = key;
+	const u64 *digits = (const u64 *)&d[1];
 	unsigned int ndigits;
-	unsigned int nbytes;
-	u8 *params_qx, *params_qy;
-	u64 *ctx_qx, *ctx_qy;
-	int err = 0;
+	int ret;
 
-	if (crypto_ecdsa_parse_pub_key(key, keylen, &params))
+	ret = ecdsa_ecc_ctx_reset(ctx);
+	if (ret < 0)
+		return ret;
+
+	if (keylen < 1 || (((keylen - 1) >> 1) % sizeof(u64)) != 0)
+		return -EINVAL;
+	/* we only accept uncompressed format indicated by '4' */
+	if (d[0] != 4)
 		return -EINVAL;
 
-	ndigits = ecdsa_supported_curve(params.curve_id);
-	if (!ndigits)
+	keylen--;
+	ndigits = (keylen >> 1) / sizeof(u64);
+	if (ndigits != ctx->curve->g.ndigits)
 		return -EINVAL;
 
-	err = ecc_is_pub_key_valid(params.curve_id, ndigits,
-				   params.key, params.key_size);
-	if (err)
-		return err;
+	ecc_swap_digits(digits, ctx->pub_key.x, ndigits);
+	ecc_swap_digits(&digits[ndigits], ctx->pub_key.y, ndigits);
+	ret = ecc_is_pubkey_valid_full(ctx->curve, &ctx->pub_key);
 
-	ctx->curve_id = params.curve_id;
-	ctx->ndigits = ndigits;
-	nbytes = ndigits << ECC_DIGITS_TO_BYTES_SHIFT;
+	ctx->pub_key_set = ret == 0;
 
-	params_qx = params.key;
-	params_qy = params_qx + ECC_MAX_DIGIT_BYTES;
-
-	ctx_qx = ctx->public_key;
-	ctx_qy = ctx_qx + ECC_MAX_DIGITS;
-
-	vli_copy_from_buf(ctx_qx, ndigits, params_qx, nbytes);
-	vli_copy_from_buf(ctx_qy, ndigits, params_qy, nbytes);
-
-	memset(&params, 0, sizeof(params));
-	return 0;
+	return ret;
 }
 
-int ecdsa_set_priv_key(struct crypto_akcipher *tfm, const void *key,
-		       unsigned int keylen)
+static void ecdsa_exit_tfm(struct crypto_akcipher *tfm)
 {
-	struct ecdsa_ctx *ctx = ecdsa_get_ctx(tfm);
-	struct ecdsa params;
-	unsigned int ndigits;
-	unsigned int nbytes;
+	struct ecc_ctx *ctx = akcipher_tfm_ctx(tfm);
 
-	if (crypto_ecdsa_parse_priv_key(key, keylen, &params))
-		return -EINVAL;
-
-	ndigits = ecdsa_supported_curve(params.curve_id);
-	if (!ndigits)
-		return -EINVAL;
-
-	ctx->curve_id = params.curve_id;
-	ctx->ndigits = ndigits;
-	nbytes = ndigits << ECC_DIGITS_TO_BYTES_SHIFT;
-
-	if (ecc_is_key_valid(ctx->curve_id, ctx->ndigits,
-			     (const u64 *)params.key, params.key_size) < 0)
-		return -EINVAL;
-
-	vli_copy_from_buf(ctx->private_key, ndigits, params.key, nbytes);
-
-	memset(&params, 0, sizeof(params));
-	return 0;
+	ecdsa_ecc_ctx_deinit(ctx);
 }
 
-unsigned int ecdsa_max_size(struct crypto_akcipher *tfm)
+static unsigned int ecdsa_max_size(struct crypto_akcipher *tfm)
 {
-	struct ecdsa_ctx *ctx = ecdsa_get_ctx(tfm);
-	int nbytes = ctx->ndigits << ECC_DIGITS_TO_BYTES_SHIFT;
+	struct ecc_ctx *ctx = akcipher_tfm_ctx(tfm);
 
-	/* For r,s */
-	return 2 * nbytes;
+	return ctx->pub_key.ndigits << ECC_DIGITS_TO_BYTES_SHIFT;
 }
 
-int ecdsa_init_tfm(struct crypto_akcipher *tfm)
+static int ecdsa_nist_p384_init_tfm(struct crypto_akcipher *tfm)
 {
-	return 0;
+	struct ecc_ctx *ctx = akcipher_tfm_ctx(tfm);
+
+	return ecdsa_ecc_ctx_init(ctx, ECC_CURVE_NIST_P384);
 }
 
-void ecdsa_exit_tfm(struct crypto_akcipher *tfm)
-{
-}
-
-static struct akcipher_alg ecdsa_alg = {
-	.sign		= ecdsa_sign,
-	.verify		= ecdsa_verify,
-	.encrypt	= ecdsa_dummy_enc,
-	.decrypt	= ecdsa_dummy_dec,
-	.set_priv_key	= ecdsa_set_priv_key,
-	.set_pub_key	= ecdsa_set_pub_key,
-	.max_size	= ecdsa_max_size,
-	.init		= ecdsa_init_tfm,
-	.exit		= ecdsa_exit_tfm,
+static struct akcipher_alg ecdsa_nist_p384 = {
+	.verify = ecdsa_verify,
+	.set_pub_key = ecdsa_set_pub_key,
+	.max_size = ecdsa_max_size,
+	.init = ecdsa_nist_p384_init_tfm,
+	.exit = ecdsa_exit_tfm,
 	.base = {
-		.cra_name	= "ecdsa",
-		.cra_driver_name = "ecdsa-generic",
-		.cra_priority	= 100,
-		.cra_module	= THIS_MODULE,
-		.cra_ctxsize	= sizeof(struct ecdsa_ctx),
+		.cra_name = "ecdsa-nist-p384",
+		.cra_driver_name = "ecdsa-nist-p384-generic",
+		.cra_priority = 100,
+		.cra_module = THIS_MODULE,
+		.cra_ctxsize = sizeof(struct ecc_ctx),
 	},
 };
+
+static int ecdsa_nist_p256_init_tfm(struct crypto_akcipher *tfm)
+{
+	struct ecc_ctx *ctx = akcipher_tfm_ctx(tfm);
+
+	return ecdsa_ecc_ctx_init(ctx, ECC_CURVE_NIST_P256);
+}
+
+static struct akcipher_alg ecdsa_nist_p256 = {
+	.verify = ecdsa_verify,
+	.set_pub_key = ecdsa_set_pub_key,
+	.max_size = ecdsa_max_size,
+	.init = ecdsa_nist_p256_init_tfm,
+	.exit = ecdsa_exit_tfm,
+	.base = {
+		.cra_name = "ecdsa-nist-p256",
+		.cra_driver_name = "ecdsa-nist-p256-generic",
+		.cra_priority = 100,
+		.cra_module = THIS_MODULE,
+		.cra_ctxsize = sizeof(struct ecc_ctx),
+	},
+};
+
+static int ecdsa_nist_p192_init_tfm(struct crypto_akcipher *tfm)
+{
+	struct ecc_ctx *ctx = akcipher_tfm_ctx(tfm);
+
+	return ecdsa_ecc_ctx_init(ctx, ECC_CURVE_NIST_P192);
+}
+
+static struct akcipher_alg ecdsa_nist_p192 = {
+	.verify = ecdsa_verify,
+	.set_pub_key = ecdsa_set_pub_key,
+	.max_size = ecdsa_max_size,
+	.init = ecdsa_nist_p192_init_tfm,
+	.exit = ecdsa_exit_tfm,
+	.base = {
+		.cra_name = "ecdsa-nist-p192",
+		.cra_driver_name = "ecdsa-nist-p192-generic",
+		.cra_priority = 100,
+		.cra_module = THIS_MODULE,
+		.cra_ctxsize = sizeof(struct ecc_ctx),
+	},
+};
+static bool ecdsa_nist_p192_registered;
 
 static int ecdsa_init(void)
 {
 	int ret;
 
-	ret = crypto_register_akcipher(&ecdsa_alg);
+	/* NIST p192 may not be available in FIPS mode */
+	ret = crypto_register_akcipher(&ecdsa_nist_p192);
+	ecdsa_nist_p192_registered = ret == 0;
+
+	ret = crypto_register_akcipher(&ecdsa_nist_p256);
 	if (ret)
-		pr_err("ecdsa alg register failed. err:%d\n", ret);
+		goto nist_p256_error;
+
+	ret = crypto_register_akcipher(&ecdsa_nist_p384);
+	if (ret)
+		goto nist_p384_error;
+
+	return 0;
+
+nist_p384_error:
+	crypto_unregister_akcipher(&ecdsa_nist_p256);
+
+nist_p256_error:
+	if (ecdsa_nist_p192_registered)
+		crypto_unregister_akcipher(&ecdsa_nist_p192);
 	return ret;
 }
 
 static void ecdsa_exit(void)
 {
-	crypto_unregister_akcipher(&ecdsa_alg);
+	if (ecdsa_nist_p192_registered)
+		crypto_unregister_akcipher(&ecdsa_nist_p192);
+	crypto_unregister_akcipher(&ecdsa_nist_p256);
+	crypto_unregister_akcipher(&ecdsa_nist_p384);
 }
 
-module_init(ecdsa_init);
+subsys_initcall(ecdsa_init);
 module_exit(ecdsa_exit);
 
-MODULE_ALIAS_CRYPTO("ecdsa");
 MODULE_LICENSE("GPL");
-MODULE_DESCRIPTION("ECDSA Generic Algorithm");
-MODULE_AUTHOR("NVIDIA Corporation");
+MODULE_AUTHOR("Stefan Berger <stefanb@linux.ibm.com>");
+MODULE_DESCRIPTION("ECDSA generic algorithm");
+MODULE_ALIAS_CRYPTO("ecdsa-generic");

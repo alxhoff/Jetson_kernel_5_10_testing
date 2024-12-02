@@ -101,7 +101,7 @@ static char *big_oops_buf;
 static size_t big_oops_buf_sz;
 
 /* How much of the console log to snapshot */
-unsigned long kmsg_bytes = PSTORE_DEFAULT_KMSG_BYTES;
+unsigned long kmsg_bytes = CONFIG_PSTORE_DEFAULT_KMSG_BYTES;
 
 void pstore_set_kmsg_bytes(int bytes)
 {
@@ -386,6 +386,7 @@ void pstore_record_init(struct pstore_record *record,
 static void pstore_dump(struct kmsg_dumper *dumper,
 			enum kmsg_dump_reason reason)
 {
+	struct kmsg_dump_iter iter;
 	unsigned long	total = 0;
 	const char	*why;
 	unsigned int	part = 1;
@@ -403,6 +404,8 @@ static void pstore_dump(struct kmsg_dumper *dumper,
 	} else {
 		spin_lock_irqsave(&psinfo->buf_lock, flags);
 	}
+
+	kmsg_dump_rewind(&iter);
 
 	oopscount++;
 	while (total < kmsg_bytes) {
@@ -434,7 +437,7 @@ static void pstore_dump(struct kmsg_dumper *dumper,
 		dst_size -= header_size;
 
 		/* Write dump contents. */
-		if (!kmsg_dump_get_buffer(dumper, true, dst + header_size,
+		if (!kmsg_dump_get_buffer(&iter, true, dst + header_size,
 					  dst_size, &dump_size))
 			break;
 
@@ -558,6 +561,8 @@ out:
  */
 int pstore_register(struct pstore_info *psi)
 {
+	char *new_backend;
+
 	if (backend && strcmp(backend, psi->name)) {
 		pr_warn("ignoring unexpected backend '%s'\n", psi->name);
 		return -EPERM;
@@ -577,11 +582,16 @@ int pstore_register(struct pstore_info *psi)
 		return -EINVAL;
 	}
 
+	new_backend = kstrdup(psi->name, GFP_KERNEL);
+	if (!new_backend)
+		return -ENOMEM;
+
 	mutex_lock(&psinfo_lock);
 	if (psinfo) {
 		pr_warn("backend '%s' already loaded: ignoring '%s'\n",
 			psinfo->name, psi->name);
 		mutex_unlock(&psinfo_lock);
+		kfree(new_backend);
 		return -EBUSY;
 	}
 
@@ -614,7 +624,7 @@ int pstore_register(struct pstore_info *psi)
 	 * Update the module parameter backend, so it is visible
 	 * through /sys/module/pstore/parameters/backend
 	 */
-	backend = kstrdup(psi->name, GFP_KERNEL);
+	backend = new_backend;
 
 	pr_info("Registered %s as persistent store backend\n", psi->name);
 

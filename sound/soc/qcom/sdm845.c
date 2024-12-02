@@ -56,8 +56,8 @@ static int sdm845_slim_snd_hw_params(struct snd_pcm_substream *substream,
 	int ret = 0, i;
 
 	for_each_rtd_codec_dais(rtd, i, codec_dai) {
-		sruntime = snd_soc_dai_get_sdw_stream(codec_dai,
-						      substream->stream);
+		sruntime = snd_soc_dai_get_stream(codec_dai,
+						  substream->stream);
 		if (sruntime != ERR_PTR(-ENOTSUPP))
 			pdata->sruntime[cpu_dai->id] = sruntime;
 
@@ -288,6 +288,14 @@ static int sdm845_dai_init(struct snd_soc_pcm_runtime *rtd)
 			snd_soc_dai_set_sysclk(codec_dai, 0,
 					       WCD934X_DEFAULT_MCLK_RATE,
 					       SNDRV_PCM_STREAM_PLAYBACK);
+
+			rval = snd_soc_component_set_jack(codec_dai->component,
+							  &pdata->jack, NULL);
+			if (rval != 0 && rval != -ENOTSUPP) {
+				dev_warn(card->dev, "Failed to set jack: %d\n", rval);
+				return rval;
+			}
+
 		}
 		break;
 	default:

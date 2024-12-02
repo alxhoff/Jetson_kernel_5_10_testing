@@ -33,6 +33,7 @@ enum lockdep_wait_type {
 enum lockdep_lock_type {
 	LD_LOCK_NORMAL = 0,	/* normal, catch all */
 	LD_LOCK_PERCPU,		/* percpu */
+	LD_LOCK_WAIT_OVERRIDE,	/* annotation */
 	LD_LOCK_MAX,
 };
 
@@ -52,7 +53,7 @@ enum lockdep_lock_type {
  * NR_LOCKDEP_CACHING_CLASSES ... Number of classes
  * cached in the instance of lockdep_map
  *
- * Currently main class (subclass == 0) and signle depth subclass
+ * Currently main class (subclass == 0) and single depth subclass
  * are cached in lockdep_map. This optimization is mainly targeting
  * on rq->lock. double_rq_lock() acquires this highly competitive with
  * single depth.

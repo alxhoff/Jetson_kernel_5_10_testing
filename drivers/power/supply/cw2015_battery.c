@@ -490,7 +490,7 @@ static int cw_battery_get_property(struct power_supply *psy,
 
 	case POWER_SUPPLY_PROP_TIME_TO_EMPTY_NOW:
 		if (cw_battery_valid_time_to_empty(cw_bat))
-			val->intval = cw_bat->time_to_empty;
+			val->intval = cw_bat->time_to_empty * 60;
 		else
 			val->intval = 0;
 		break;
@@ -509,6 +509,11 @@ static int cw_battery_get_property(struct power_supply *psy,
 			val->intval = cw_bat->battery.charge_full_design_uah;
 		else
 			val->intval = 0;
+		break;
+
+	case POWER_SUPPLY_PROP_CHARGE_NOW:
+		val->intval = cw_bat->battery.charge_full_design_uah;
+		val->intval = val->intval * cw_bat->soc / 100;
 		break;
 
 	case POWER_SUPPLY_PROP_CURRENT_NOW:
@@ -542,6 +547,7 @@ static enum power_supply_property cw_battery_properties[] = {
 	POWER_SUPPLY_PROP_CHARGE_COUNTER,
 	POWER_SUPPLY_PROP_CHARGE_FULL,
 	POWER_SUPPLY_PROP_CHARGE_FULL_DESIGN,
+	POWER_SUPPLY_PROP_CHARGE_NOW,
 	POWER_SUPPLY_PROP_CURRENT_NOW,
 };
 

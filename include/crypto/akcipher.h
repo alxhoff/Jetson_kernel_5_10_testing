@@ -3,7 +3,6 @@
  * Public Key Encryption
  *
  * Copyright (c) 2015, Intel Corporation
- * Copyright (c) 2017-2020, NVIDIA Corporation. All Rights Reserved.
  * Authors: Tadeusz Struk <tadeusz.struk@intel.com>
  */
 #ifndef _CRYPTO_AKCIPHER_H
@@ -29,7 +28,6 @@
  *		In case of error where the dst sgl size was insufficient,
  *		it will be updated to the size required for the operation.
  *		For verify op this is size of digest part in @src.
- * @info:	Any request specific data needed to process the request.
  * @__ctx:	Start of private context data
  */
 struct akcipher_request {
@@ -38,7 +36,6 @@ struct akcipher_request {
 	struct scatterlist *dst;
 	unsigned int src_len;
 	unsigned int dst_len;
-	void *info;
 	void *__ctx[] CRYPTO_MINALIGN_ATTR;
 };
 
@@ -198,7 +195,7 @@ static inline struct akcipher_request *akcipher_request_alloc(
 {
 	struct akcipher_request *req;
 
-	req = kzalloc(sizeof(*req) + crypto_akcipher_reqsize(tfm), gfp);
+	req = kmalloc(sizeof(*req) + crypto_akcipher_reqsize(tfm), gfp);
 	if (likely(req))
 		akcipher_request_set_tfm(req, tfm);
 

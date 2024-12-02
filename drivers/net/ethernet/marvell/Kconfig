@@ -6,7 +6,7 @@
 config NET_VENDOR_MARVELL
 	bool "Marvell devices"
 	default y
-	depends on PCI || CPU_PXA168 || MV64X60 || PPC32 || PLAT_ORION || INET || COMPILE_TEST
+	depends on PCI || CPU_PXA168 || PPC32 || PLAT_ORION || INET || COMPILE_TEST
 	help
 	  If you have a network (Ethernet) card belonging to this class, say Y.
 
@@ -19,7 +19,7 @@ if NET_VENDOR_MARVELL
 
 config MV643XX_ETH
 	tristate "Marvell Discovery (643XX) and Orion ethernet support"
-	depends on MV64X60 || PPC32 || PLAT_ORION || COMPILE_TEST
+	depends on PPC32 || PLAT_ORION || COMPILE_TEST
 	depends on INET
 	select PHYLIB
 	select MVMDIO
@@ -94,7 +94,6 @@ config MVPP2
 
 config MVPP2_PTP
 	bool "Marvell Armada 8K Enable PTP support"
-	depends on NETWORK_PHY_TIMESTAMPING
 	depends on (PTP_1588_CLOCK = y && MVPP2 = y) || \
 		   (PTP_1588_CLOCK && MVPP2 = m)
 
@@ -176,13 +175,6 @@ config SKY2_DEBUG
 
 	  If unsure, say N.
 
-config OAK
-	tristate "Marvell SPRUCE/OAK PCI driver support"
-	depends on PCI
-	help
-	  This flag enables PCI driver support for 88Q6113 and 88Q5072
-	  11 port ethernet switch. Port 11 of the switch supports the
-	  PCI interface.
 
 source "drivers/net/ethernet/marvell/octeontx2/Kconfig"
 source "drivers/net/ethernet/marvell/prestera/Kconfig"

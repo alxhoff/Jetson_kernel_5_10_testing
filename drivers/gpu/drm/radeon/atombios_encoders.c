@@ -33,6 +33,7 @@
 #include <drm/radeon_drm.h>
 
 #include "atom.h"
+#include "radeon_atombios.h"
 #include "radeon.h"
 #include "radeon_asic.h"
 #include "radeon_audio.h"
@@ -296,10 +297,6 @@ static void radeon_atom_backlight_exit(struct radeon_encoder *encoder)
 }
 
 #endif
-
-/* evil but including atombios.h is much worse */
-bool radeon_atom_get_tv_timings(struct radeon_device *rdev, int index,
-				struct drm_display_mode *mode);
 
 static bool radeon_atom_mode_fixup(struct drm_encoder *encoder,
 				   const struct drm_display_mode *mode,
@@ -2066,9 +2063,9 @@ atombios_apply_encoder_quirks(struct drm_encoder *encoder,
 	struct radeon_crtc *radeon_crtc = to_radeon_crtc(encoder->crtc);
 
 	/* Funky macbooks */
-	if ((dev->pdev->device == 0x71C5) &&
-	    (dev->pdev->subsystem_vendor == 0x106b) &&
-	    (dev->pdev->subsystem_device == 0x0080)) {
+	if ((rdev->pdev->device == 0x71C5) &&
+	    (rdev->pdev->subsystem_vendor == 0x106b) &&
+	    (rdev->pdev->subsystem_device == 0x0080)) {
 		if (radeon_encoder->devices & ATOM_DEVICE_LCD1_SUPPORT) {
 			uint32_t lvtma_bit_depth_control = RREG32(AVIVO_LVTMA_BIT_DEPTH_CONTROL);
 
@@ -2191,11 +2188,12 @@ int radeon_atom_pick_dig_encoder(struct drm_encoder *encoder, int fe_idx)
 
 	/*
 	 * On DCE32 any encoder can drive any block so usually just use crtc id,
-	 * but Apple thinks different at least on iMac10,1, so there use linkb,
+	 * but Apple thinks different at least on iMac10,1 and iMac11,2, so there use linkb,
 	 * otherwise the internal eDP panel will stay dark.
 	 */
 	if (ASIC_IS_DCE32(rdev)) {
-		if (dmi_match(DMI_PRODUCT_NAME, "iMac10,1"))
+		if (dmi_match(DMI_PRODUCT_NAME, "iMac10,1") ||
+		    dmi_match(DMI_PRODUCT_NAME, "iMac11,2"))
 			enc_idx = (dig->linkb) ? 1 : 0;
 		else
 			enc_idx = radeon_crtc->crtc_id;

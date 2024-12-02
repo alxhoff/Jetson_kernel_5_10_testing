@@ -9,8 +9,6 @@ PREEMPT_RT=$5
 CC_VERSION="$6"
 LD=$7
 
-vecho() { [ "${quiet}" = "silent_" ] || echo "$@" ; }
-
 # Do not expand names
 set -f
 
@@ -44,7 +42,7 @@ UTS_VERSION="#$VERSION"
 CONFIG_FLAGS=""
 if [ -n "$SMP" ] ; then CONFIG_FLAGS="SMP"; fi
 if [ -n "$PREEMPT" ] ; then CONFIG_FLAGS="$CONFIG_FLAGS PREEMPT"; fi
-if [ -n "$PREEMPT_RT" ] ; then CONFIG_FLAGS="$CONFIG_FLAGS PREEMPT RT"; fi
+if [ -n "$PREEMPT_RT" ] ; then CONFIG_FLAGS="$CONFIG_FLAGS PREEMPT_RT"; fi
 
 # Truncate to maximum length
 UTS_LEN=64
@@ -90,7 +88,7 @@ if [ -r $TARGET ] && \
       cmp -s .tmpver.1 .tmpver.2; then
    rm -f .tmpcompile
 else
-   vecho "  UPD     $TARGET"
+   echo "  UPD     $TARGET"
    mv -f .tmpcompile $TARGET
 fi
 rm -f .tmpver.1 .tmpver.2

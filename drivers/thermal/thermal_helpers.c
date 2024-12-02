@@ -90,7 +90,7 @@ int thermal_zone_get_temp(struct thermal_zone_device *tz, int *temp)
 	ret = tz->ops->get_temp(tz, temp);
 
 	if (IS_ENABLED(CONFIG_THERMAL_EMULATION) && tz->emul_temperature) {
-		for (count = 0; count < tz->trips; count++) {
+		for (count = 0; count < tz->num_trips; count++) {
 			ret = tz->ops->get_trip_type(tz, count, &type);
 			if (!ret && type == THERMAL_TRIP_CRITICAL) {
 				ret = tz->ops->get_trip_temp(tz, count,
@@ -138,7 +138,7 @@ void thermal_zone_set_trips(struct thermal_zone_device *tz)
 	if (!tz->ops->set_trips || !tz->ops->get_trip_hyst)
 		goto exit;
 
-	for (i = 0; i < tz->trips; i++) {
+	for (i = 0; i < tz->num_trips; i++) {
 		int trip_low;
 
 		tz->ops->get_trip_temp(tz, i, &trip_temp);
@@ -152,6 +152,10 @@ void thermal_zone_set_trips(struct thermal_zone_device *tz)
 		if (trip_temp > tz->temperature && trip_temp < high)
 			high = trip_temp;
 	}
+
+	/* No need to change trip points */
+	if (tz->prev_low_trip == low && tz->prev_high_trip == high)
+		goto exit;
 
 	tz->prev_low_trip = low;
 	tz->prev_high_trip = high;
@@ -171,6 +175,13 @@ exit:
 	mutex_unlock(&tz->lock);
 }
 
+void thermal_set_delay_jiffies(unsigned long *delay_jiffies, int delay_ms)
+{
+	*delay_jiffies = msecs_to_jiffies(delay_ms);
+	if (delay_ms > 1000)
+		*delay_jiffies = round_jiffies(*delay_jiffies);
+}
+
 static void thermal_cdev_set_cur_state(struct thermal_cooling_device *cdev,
 				       int target)
 {
@@ -181,17 +192,10 @@ static void thermal_cdev_set_cur_state(struct thermal_cooling_device *cdev,
 	thermal_cooling_device_stats_update(cdev, target);
 }
 
-void thermal_cdev_update(struct thermal_cooling_device *cdev)
+void __thermal_cdev_update(struct thermal_cooling_device *cdev)
 {
 	struct thermal_instance *instance;
 	unsigned long target = 0;
-
-	mutex_lock(&cdev->lock);
-	/* cooling device is updated*/
-	if (cdev->updated) {
-		mutex_unlock(&cdev->lock);
-		return;
-	}
 
 	/* Make sure cdev enters the deepest cooling state */
 	list_for_each_entry(instance, &cdev->thermal_instances, cdev_node) {
@@ -205,10 +209,24 @@ void thermal_cdev_update(struct thermal_cooling_device *cdev)
 
 	thermal_cdev_set_cur_state(cdev, target);
 
-	cdev->updated = true;
-	mutex_unlock(&cdev->lock);
 	trace_cdev_update(cdev, target);
 	dev_dbg(&cdev->device, "set to state %lu\n", target);
+}
+
+/**
+ * thermal_cdev_update - update cooling device state if needed
+ * @cdev:	pointer to struct thermal_cooling_device
+ *
+ * Update the cooling device state if there is a need.
+ */
+void thermal_cdev_update(struct thermal_cooling_device *cdev)
+{
+	mutex_lock(&cdev->lock);
+	if (!cdev->updated) {
+		__thermal_cdev_update(cdev);
+		cdev->updated = true;
+	}
+	mutex_unlock(&cdev->lock);
 }
 EXPORT_SYMBOL(thermal_cdev_update);
 

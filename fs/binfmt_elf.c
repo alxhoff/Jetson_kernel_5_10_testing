@@ -186,6 +186,7 @@ create_elf_tables(struct linux_binprm *bprm, const struct elfhdr *exec,
 	unsigned char k_rand_bytes[16];
 	int items;
 	elf_addr_t *elf_info;
+	elf_addr_t flags = 0;
 	int ei_index;
 	const struct cred *cred = current_cred();
 	struct vm_area_struct *vma;
@@ -260,7 +261,9 @@ create_elf_tables(struct linux_binprm *bprm, const struct elfhdr *exec,
 	NEW_AUX_ENT(AT_PHENT, sizeof(struct elf_phdr));
 	NEW_AUX_ENT(AT_PHNUM, exec->e_phnum);
 	NEW_AUX_ENT(AT_BASE, interp_load_addr);
-	NEW_AUX_ENT(AT_FLAGS, 0);
+	if (bprm->interp_flags & BINPRM_FLAGS_PRESERVE_ARGV0)
+		flags |= AT_FLAGS_PRESERVE_ARGV0;
+	NEW_AUX_ENT(AT_FLAGS, flags);
 	NEW_AUX_ENT(AT_ENTRY, e_entry);
 	NEW_AUX_ENT(AT_UID, from_kuid_munged(cred->user_ns, cred->uid));
 	NEW_AUX_ENT(AT_EUID, from_kuid_munged(cred->user_ns, cred->euid));
@@ -619,7 +622,7 @@ static unsigned long load_elf_interp(struct elfhdr *interp_elf_ex,
 	eppnt = interp_elf_phdata;
 	for (i = 0; i < interp_elf_ex->e_phnum; i++, eppnt++) {
 		if (eppnt->p_type == PT_LOAD) {
-			int elf_type = MAP_PRIVATE | MAP_DENYWRITE;
+			int elf_type = MAP_PRIVATE;
 			int elf_prot = make_prot(eppnt->p_flags, arch_state,
 						 true, true);
 			unsigned long vaddr = 0;
@@ -907,7 +910,7 @@ static int load_elf_binary(struct linux_binprm *bprm)
 		interp_elf_ex = kmalloc(sizeof(*interp_elf_ex), GFP_KERNEL);
 		if (!interp_elf_ex) {
 			retval = -ENOMEM;
-			goto out_free_ph;
+			goto out_free_file;
 		}
 
 		/* Get the exec headers */
@@ -1067,7 +1070,7 @@ out_free_interp:
 		elf_prot = make_prot(elf_ppnt->p_flags, &arch_state,
 				     !!interpreter, false);
 
-		elf_flags = MAP_PRIVATE | MAP_DENYWRITE | MAP_EXECUTABLE;
+		elf_flags = MAP_PRIVATE;
 
 		vaddr = elf_ppnt->p_vaddr;
 		/*
@@ -1258,7 +1261,7 @@ out_free_interp:
 	set_binfmt(&elf_format);
 
 #ifdef ARCH_HAS_SETUP_ADDITIONAL_PAGES
-	retval = arch_setup_additional_pages(bprm, !!interpreter);
+	retval = ARCH_SETUP_ADDITIONAL_PAGES(bprm, elf_ex, !!interpreter);
 	if (retval < 0)
 		goto out;
 #endif /* ARCH_HAS_SETUP_ADDITIONAL_PAGES */
@@ -1319,7 +1322,7 @@ out_free_interp:
 #endif
 
 	finalize_exec(bprm);
-	start_thread(regs, elf_entry, bprm->p);
+	START_THREAD(elf_ex, regs, elf_entry, bprm->p);
 	retval = 0;
 out:
 	return retval;
@@ -1328,6 +1331,7 @@ out:
 out_free_dentry:
 	kfree(interp_elf_ex);
 	kfree(interp_elf_phdata);
+out_free_file:
 	allow_write_access(interpreter);
 	if (interpreter)
 		fput(interpreter);
@@ -1393,7 +1397,7 @@ static int load_elf_library(struct file *file)
 			(eppnt->p_filesz +
 			 ELF_PAGEOFFSET(eppnt->p_vaddr)),
 			PROT_READ | PROT_WRITE | PROT_EXEC,
-			MAP_FIXED_NOREPLACE | MAP_PRIVATE | MAP_DENYWRITE,
+			MAP_FIXED_NOREPLACE | MAP_PRIVATE,
 			(eppnt->p_offset -
 			 ELF_PAGEOFFSET(eppnt->p_vaddr)));
 	if (error != ELF_PAGESTART(eppnt->p_vaddr))
@@ -1507,7 +1511,7 @@ static void fill_note(struct memelfnote *note, const char *name, int type,
  * fill up all the fields in prstatus from the given task struct, except
  * registers which need to be filled up separately.
  */
-static void fill_prstatus(struct elf_prstatus *prstatus,
+static void fill_prstatus(struct elf_prstatus_common *prstatus,
 		struct task_struct *p, long signr)
 {
 	prstatus->pr_info.si_signo = prstatus->pr_cursig = signr;
@@ -1546,6 +1550,7 @@ static int fill_psinfo(struct elf_prpsinfo *psinfo, struct task_struct *p,
 {
 	const struct cred *cred;
 	unsigned int i, len;
+	unsigned int state;
 
 	/* first copy the parameters from user space */
 	memset(psinfo, 0, sizeof(struct elf_prpsinfo));
@@ -1568,7 +1573,8 @@ static int fill_psinfo(struct elf_prpsinfo *psinfo, struct task_struct *p,
 	psinfo->pr_pgrp = task_pgrp_vnr(p);
 	psinfo->pr_sid = task_session_vnr(p);
 
-	i = p->state ? ffz(~p->state) + 1 : 0;
+	state = READ_ONCE(p->__state);
+	i = state ? ffz(~state) + 1 : 0;
 	psinfo->pr_state = i;
 	psinfo->pr_sname = (i > 5) ? '.' : "RSDTZW"[i];
 	psinfo->pr_zomb = psinfo->pr_sname == 'Z';
@@ -1579,7 +1585,7 @@ static int fill_psinfo(struct elf_prpsinfo *psinfo, struct task_struct *p,
 	SET_UID(psinfo->pr_uid, from_kuid_munged(cred->user_ns, cred->uid));
 	SET_GID(psinfo->pr_gid, from_kgid_munged(cred->user_ns, cred->gid));
 	rcu_read_unlock();
-	strlcpy(psinfo->pr_fname, p->comm, sizeof(psinfo->pr_fname));
+	strncpy(psinfo->pr_fname, p->comm, sizeof(psinfo->pr_fname));
 
 	return 0;
 }
@@ -1729,11 +1735,11 @@ static void do_thread_regset_writeback(struct task_struct *task,
 }
 
 #ifndef PRSTATUS_SIZE
-#define PRSTATUS_SIZE(S, R) sizeof(S)
+#define PRSTATUS_SIZE sizeof(struct elf_prstatus)
 #endif
 
 #ifndef SET_PR_FPVALID
-#define SET_PR_FPVALID(S, V, R) ((S)->pr_fpvalid = (V))
+#define SET_PR_FPVALID(S) ((S)->pr_fpvalid = 1)
 #endif
 
 static int fill_thread_core_info(struct elf_thread_core_info *t,
@@ -1741,7 +1747,6 @@ static int fill_thread_core_info(struct elf_thread_core_info *t,
 				 long signr, size_t *total)
 {
 	unsigned int i;
-	int regset0_size;
 
 	/*
 	 * NT_PRSTATUS is the one special case, because the regset data
@@ -1749,14 +1754,12 @@ static int fill_thread_core_info(struct elf_thread_core_info *t,
 	 * than being the whole note contents.  We fill the reset in here.
 	 * We assume that regset 0 is NT_PRSTATUS.
 	 */
-	fill_prstatus(&t->prstatus, t->task, signr);
-	regset0_size = regset_get(t->task, &view->regsets[0],
+	fill_prstatus(&t->prstatus.common, t->task, signr);
+	regset_get(t->task, &view->regsets[0],
 		   sizeof(t->prstatus.pr_reg), &t->prstatus.pr_reg);
-	if (regset0_size < 0)
-		return 0;
 
 	fill_note(&t->notes[0], "CORE", NT_PRSTATUS,
-		  PRSTATUS_SIZE(t->prstatus, regset0_size), &t->prstatus);
+		  PRSTATUS_SIZE, &t->prstatus);
 	*total += notesize(&t->notes[0]);
 
 	do_thread_regset_writeback(t->task, &view->regsets[0]);
@@ -1784,7 +1787,7 @@ static int fill_thread_core_info(struct elf_thread_core_info *t,
 			continue;
 
 		if (is_fpreg)
-			SET_PR_FPVALID(&t->prstatus, 1, regset0_size);
+			SET_PR_FPVALID(&t->prstatus);
 
 		fill_note(&t->notes[i], is_fpreg ? "CORE" : "LINUX",
 			  note_type, ret, data);
@@ -1973,7 +1976,7 @@ static int elf_dump_thread_status(long signr, struct elf_thread_status *t)
 	struct task_struct *p = t->thread;
 	t->num_notes = 0;
 
-	fill_prstatus(&t->prstatus, p, signr);
+	fill_prstatus(&t->prstatus.common, p, signr);
 	elf_core_copy_task_regs(p, &t->prstatus.pr_reg);	
 	
 	fill_note(&t->notes[0], "CORE", NT_PRSTATUS, sizeof(t->prstatus),
@@ -2052,7 +2055,7 @@ static int fill_note_info(struct elfhdr *elf, int phdrs,
 	}
 	/* now collect the dump for the current */
 	memset(info->prstatus, 0, sizeof(*info->prstatus));
-	fill_prstatus(info->prstatus, current, cprm->siginfo->si_signo);
+	fill_prstatus(&info->prstatus->common, current, cprm->siginfo->si_signo);
 	elf_core_copy_regs(&info->prstatus->pr_reg, cprm->regs);
 
 	/* Set up header */
@@ -2205,6 +2208,7 @@ static int elf_core_dump(struct coredump_params *cprm)
 	{
 		size_t sz = get_note_info_size(&info);
 
+		/* For cell spufs */
 		sz += elf_coredump_extra_notes_size();
 
 		phdr4note = kmalloc(sizeof(*phdr4note), GFP_KERNEL);
@@ -2268,12 +2272,12 @@ static int elf_core_dump(struct coredump_params *cprm)
 	if (!write_note_info(&info, cprm))
 		goto end_coredump;
 
+	/* For cell spufs */
 	if (elf_coredump_extra_notes_write(cprm))
 		goto end_coredump;
 
 	/* Align to page */
-	if (!dump_skip(cprm, dataoff - cprm->pos))
-		goto end_coredump;
+	dump_skip_to(cprm, dataoff);
 
 	for (i = 0; i < cprm->vma_count; i++) {
 		struct core_vma_metadata *meta = cprm->vma_meta + i;
@@ -2281,7 +2285,6 @@ static int elf_core_dump(struct coredump_params *cprm)
 		if (!dump_user_range(cprm, meta->start, meta->dump_size))
 			goto end_coredump;
 	}
-	dump_truncate(cprm);
 
 	if (!elf_core_write_extra_data(cprm))
 		goto end_coredump;

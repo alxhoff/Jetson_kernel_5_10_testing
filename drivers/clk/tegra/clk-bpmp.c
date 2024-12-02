@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-only
 /*
- * Copyright (C) 2016-2020 NVIDIA Corporation
+ * Copyright (C) 2016-2022 NVIDIA Corporation
  */
 
 #include <linux/clk-provider.h>
@@ -159,30 +159,25 @@ static unsigned long tegra_bpmp_clk_recalc_rate(struct clk_hw *hw,
 
 	err = tegra_bpmp_clk_transfer(clk->bpmp, &msg);
 	if (err < 0)
-		return err;
+		return 0;
 
 	return response.rate;
 }
 
-static int64_t tegra_bpmp_clk_clip_rate(unsigned long rate)
-{
-	return rate > S64_MAX ? S64_MAX : rate;
-}
-
 static int tegra_bpmp_clk_determine_rate(struct clk_hw *hw,
-				struct clk_rate_request *rate_req)
+					 struct clk_rate_request *rate_req)
 {
 	struct tegra_bpmp_clk *clk = to_tegra_bpmp_clk(hw);
 	struct cmd_clk_round_rate_response response;
 	struct cmd_clk_round_rate_request request;
 	struct tegra_bpmp_clk_message msg;
-	int err;
 	unsigned long rate;
+	int err;
 
 	rate = min(max(rate_req->rate, rate_req->min_rate), rate_req->max_rate);
 
 	memset(&request, 0, sizeof(request));
-	request.rate = tegra_bpmp_clk_clip_rate(rate);
+	request.rate = min_t(u64, rate, S64_MAX);
 
 	memset(&msg, 0, sizeof(msg));
 	msg.cmd = CMD_CLK_ROUND_RATE;
@@ -196,7 +191,7 @@ static int tegra_bpmp_clk_determine_rate(struct clk_hw *hw,
 	if (err < 0)
 		return err;
 
-	rate_req->rate = (unsigned long) response.rate;
+	rate_req->rate = (unsigned long)response.rate;
 
 	return 0;
 }
@@ -266,7 +261,7 @@ static int tegra_bpmp_clk_set_rate(struct clk_hw *hw, unsigned long rate,
 	struct tegra_bpmp_clk_message msg;
 
 	memset(&request, 0, sizeof(request));
-	request.rate = tegra_bpmp_clk_clip_rate(rate);
+	request.rate = min_t(u64, rate, S64_MAX);
 
 	memset(&msg, 0, sizeof(msg));
 	msg.cmd = CMD_CLK_SET_RATE;
@@ -315,6 +310,23 @@ static const struct clk_ops tegra_bpmp_clk_mux_rate_ops = {
 	.set_rate = tegra_bpmp_clk_set_rate,
 };
 
+static const struct clk_ops tegra_bpmp_clk_mux_read_only_ops = {
+	.get_parent = tegra_bpmp_clk_get_parent,
+	.recalc_rate = tegra_bpmp_clk_recalc_rate,
+};
+
+static const struct clk_ops tegra_bpmp_clk_read_only_ops = {
+	.recalc_rate = tegra_bpmp_clk_recalc_rate,
+};
+
+static const struct clk_ops tegra_bpmp_clk_gate_mux_read_only_ops = {
+	.prepare = tegra_bpmp_clk_prepare,
+	.unprepare = tegra_bpmp_clk_unprepare,
+	.is_prepared = tegra_bpmp_clk_is_prepared,
+	.recalc_rate = tegra_bpmp_clk_recalc_rate,
+	.get_parent = tegra_bpmp_clk_get_parent,
+};
+
 static int tegra_bpmp_clk_get_max_id(struct tegra_bpmp *bpmp)
 {
 	struct cmd_clk_get_max_clk_id_response response;
@@ -354,7 +366,7 @@ static int tegra_bpmp_clk_get_info(struct tegra_bpmp *bpmp, unsigned int id,
 	if (err < 0)
 		return err;
 
-	strlcpy(info->name, response.name, MRQ_CLK_NAME_MAXLEN);
+	strscpy(info->name, response.name, MRQ_CLK_NAME_MAXLEN);
 	info->num_parents = response.num_parents;
 
 	for (i = 0; i < info->num_parents; i++)
@@ -515,8 +527,22 @@ tegra_bpmp_clk_register(struct tegra_bpmp *bpmp,
 	memset(&init, 0, sizeof(init));
 	init.name = info->name;
 	clk->hw.init = &init;
-
-	if (info->flags & TEGRA_BPMP_CLK_HAS_MUX) {
+	if (info->flags & BPMP_CLK_STATE_CHANGE_DENIED) {
+		if ((info->flags & BPMP_CLK_RATE_PARENT_CHANGE_DENIED) == 0) {
+			dev_WARN(bpmp->dev,
+				"Firmware bug! Inconsistent permission bits for clock %s. State and parent/rate changes disabled.",
+				 init.name);
+		}
+		if (info->flags & TEGRA_BPMP_CLK_HAS_MUX)
+			init.ops = &tegra_bpmp_clk_mux_read_only_ops;
+		else
+			init.ops = &tegra_bpmp_clk_read_only_ops;
+	} else if (info->flags & BPMP_CLK_RATE_PARENT_CHANGE_DENIED) {
+		if (info->flags & TEGRA_BPMP_CLK_HAS_MUX)
+			init.ops = &tegra_bpmp_clk_gate_mux_read_only_ops;
+		else
+			init.ops = &tegra_bpmp_clk_gate_ops;
+	} else if (info->flags & TEGRA_BPMP_CLK_HAS_MUX) {
 		if (info->flags & TEGRA_BPMP_CLK_HAS_SET_RATE)
 			init.ops = &tegra_bpmp_clk_mux_rate_ops;
 		else
@@ -572,7 +598,7 @@ static void tegra_bpmp_register_clocks_one(struct tegra_bpmp *bpmp,
 	struct tegra_bpmp_clk_info *info;
 	struct tegra_bpmp_clk *clk;
 
-	if (bpmp->clocks[i] != NULL) {
+	if (bpmp->clocks[i]) {
 		/* already registered */
 		return;
 	}
@@ -582,9 +608,8 @@ static void tegra_bpmp_register_clocks_one(struct tegra_bpmp *bpmp,
 		unsigned int p_id = info->parents[j];
 		unsigned int p_i = tegra_bpmp_clk_id_to_index(infos, count,
 							      p_id);
-		if (p_i < count) {
+		if (p_i < count)
 			tegra_bpmp_register_clocks_one(bpmp, infos, p_i, count);
-		}
 	}
 
 	clk = tegra_bpmp_clk_register(bpmp, info, infos, count);
@@ -594,7 +619,8 @@ static void tegra_bpmp_register_clocks_one(struct tegra_bpmp *bpmp,
 			info->id, info->name, PTR_ERR(clk));
 		/* intentionally store the error pointer to
 		 * bpmp->clocks[i] to avoid re-attempting the
-		 * registration later */
+		 * registration later
+		 */
 	}
 
 	bpmp->clocks[i] = clk;

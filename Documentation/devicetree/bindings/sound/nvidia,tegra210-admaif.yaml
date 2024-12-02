@@ -16,7 +16,6 @@ description: |
 maintainers:
   - Jon Hunter <jonathanh@nvidia.com>
   - Sameer Pujar <spujar@nvidia.com>
-  - Mohan Kumar D <mkumard@nvidia.com>
 
 properties:
   $nodename:
@@ -38,9 +37,19 @@ properties:
 
   dma-names: true
 
-  "#sound-dai-cells":
-    description: The cell specifies number of DAIs.
-    const: 1
+  ports:
+    $ref: /schemas/graph.yaml#/properties/ports
+    description: |
+      Contains list of ACIF (Audio CIF) port nodes for ADMAIF channels.
+      The number of port nodes depends on the number of ADMAIF channels
+      that SoC may have. These are interfaced with respective ACIF ports
+      in AHUB (Audio Hub). Each port is capable of data transfers in
+      both directions.
+
+    patternProperties:
+      '^port@[0-9]':
+        $ref: audio-graph-port.yaml#
+        unevaluatedProperties: false
 
 if:
   properties:
@@ -85,7 +94,6 @@ required:
   - reg
   - dmas
   - dma-names
-  - "#sound-dai-cells"
 
 additionalProperties: false
 
@@ -114,7 +122,6 @@ examples:
                     "rx8",  "tx8",
                     "rx9",  "tx9",
                     "rx10", "tx10";
-        #sound-dai-cells = <1>;
     };
 
 ...

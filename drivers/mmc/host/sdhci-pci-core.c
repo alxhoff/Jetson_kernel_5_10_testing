@@ -297,6 +297,27 @@ static const struct sdhci_pci_fixes sdhci_ricoh_mmc = {
 			  SDHCI_QUIRK_MISSING_CAPS
 };
 
+static void ene_714_set_ios(struct mmc_host *mmc, struct mmc_ios *ios)
+{
+	struct sdhci_host *host = mmc_priv(mmc);
+
+	sdhci_set_ios(mmc, ios);
+
+	/*
+	 * Some (ENE) controllers misbehave on some ios operations,
+	 * signalling timeout and CRC errors even on CMD0. Resetting
+	 * it on each ios seems to solve the problem.
+	 */
+	if (!(host->flags & SDHCI_DEVICE_DEAD))
+		sdhci_reset(host, SDHCI_RESET_CMD | SDHCI_RESET_DATA);
+}
+
+static int ene_714_probe_slot(struct sdhci_pci_slot *slot)
+{
+	slot->host->mmc_host_ops.set_ios = ene_714_set_ios;
+	return 0;
+}
+
 static const struct sdhci_pci_fixes sdhci_ene_712 = {
 	.quirks		= SDHCI_QUIRK_SINGLE_POWER_WRITE |
 			  SDHCI_QUIRK_BROKEN_DMA,
@@ -304,8 +325,8 @@ static const struct sdhci_pci_fixes sdhci_ene_712 = {
 
 static const struct sdhci_pci_fixes sdhci_ene_714 = {
 	.quirks		= SDHCI_QUIRK_SINGLE_POWER_WRITE |
-			  SDHCI_QUIRK_RESET_CMD_DATA_ON_IOS |
 			  SDHCI_QUIRK_BROKEN_DMA,
+	.probe_slot	= ene_714_probe_slot,
 };
 
 static const struct sdhci_pci_fixes sdhci_cafe = {
@@ -616,15 +637,11 @@ static int intel_select_drive_strength(struct mmc_card *card,
 	return intel_host->drv_strength;
 }
 
-static int bxt_get_cd(struct mmc_host *mmc)
+static int sdhci_get_cd_nogpio(struct mmc_host *mmc)
 {
-	int gpio_cd = mmc_gpio_get_cd(mmc);
 	struct sdhci_host *host = mmc_priv(mmc);
 	unsigned long flags;
 	int ret = 0;
-
-	if (!gpio_cd)
-		return 0;
 
 	spin_lock_irqsave(&host->lock, flags);
 
@@ -636,6 +653,21 @@ out:
 	spin_unlock_irqrestore(&host->lock, flags);
 
 	return ret;
+}
+
+static int bxt_get_cd(struct mmc_host *mmc)
+{
+	int gpio_cd = mmc_gpio_get_cd(mmc);
+
+	if (!gpio_cd)
+		return 0;
+
+	return sdhci_get_cd_nogpio(mmc);
+}
+
+static int mrfld_get_cd(struct mmc_host *mmc)
+{
+	return sdhci_get_cd_nogpio(mmc);
 }
 
 #define SDHCI_INTEL_PWR_TIMEOUT_CNT	20
@@ -967,6 +999,12 @@ static bool glk_broken_cqhci(struct sdhci_pci_slot *slot)
 		dmi_match(DMI_SYS_VENDOR, "IRBIS"));
 }
 
+static bool jsl_broken_hs400es(struct sdhci_pci_slot *slot)
+{
+	return slot->chip->pdev->device == PCI_DEVICE_ID_INTEL_JSL_EMMC &&
+			dmi_match(DMI_BIOS_VENDOR, "ASUSTeK COMPUTER INC.");
+}
+
 static int glk_emmc_probe_slot(struct sdhci_pci_slot *slot)
 {
 	int ret = byt_emmc_probe_slot(slot);
@@ -975,9 +1013,11 @@ static int glk_emmc_probe_slot(struct sdhci_pci_slot *slot)
 		slot->host->mmc->caps2 |= MMC_CAP2_CQE;
 
 	if (slot->chip->pdev->device != PCI_DEVICE_ID_INTEL_GLK_EMMC) {
-		slot->host->mmc->caps2 |= MMC_CAP2_HS400_ES,
-		slot->host->mmc_host_ops.hs400_enhanced_strobe =
-						intel_hs400_enhanced_strobe;
+		if (!jsl_broken_hs400es(slot)) {
+			slot->host->mmc->caps2 |= MMC_CAP2_HS400_ES;
+			slot->host->mmc_host_ops.hs400_enhanced_strobe =
+							intel_hs400_enhanced_strobe;
+		}
 		slot->host->mmc->caps2 |= MMC_CAP2_CQE_DCMD;
 	}
 
@@ -1341,6 +1381,14 @@ static int intel_mrfld_mmc_probe_slot(struct sdhci_pci_slot *slot)
 					 MMC_CAP_1_8V_DDR;
 		break;
 	case INTEL_MRFLD_SD:
+		slot->cd_idx = 0;
+		slot->cd_override_level = true;
+		/*
+		 * There are two PCB designs of SD card slot with the opposite
+		 * card detection sense. Quirk this out by ignoring GPIO state
+		 * completely in the custom ->get_cd() callback.
+		 */
+		slot->host->mmc_host_ops.get_cd = mrfld_get_cd;
 		slot->host->quirks2 |= SDHCI_QUIRK2_NO_1_8_V;
 		break;
 	case INTEL_MRFLD_SDIO:
@@ -1790,6 +1838,8 @@ static int amd_probe(struct sdhci_pci_chip *chip)
 			gen = AMD_CHIPSET_UNKNOWN;
 		}
 	}
+
+	pci_dev_put(smbus_dev);
 
 	if (gen == AMD_CHIPSET_BEFORE_ML || gen == AMD_CHIPSET_CZ)
 		chip->quirks2 |= SDHCI_QUIRK2_CLEAR_TRANSFERMODE_REG_BEFORE_CMD;

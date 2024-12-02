@@ -377,6 +377,8 @@ static int mpls_forward(struct sk_buff *skb, struct net_device *dev,
 	if (!pskb_may_pull(skb, sizeof(*hdr)))
 		goto err;
 
+	skb_dst_drop(skb);
+
 	/* Read and decode the label */
 	hdr = mpls_hdr(skb);
 	dec = mpls_entry_decode(hdr);
@@ -405,7 +407,6 @@ static int mpls_forward(struct sk_buff *skb, struct net_device *dev,
 	/* Verify ttl is valid */
 	if (dec.ttl <= 1)
 		goto err;
-	dec.ttl -= 1;
 
 	/* Find the output device */
 	out_dev = rcu_dereference(nh->nh_dev);
@@ -429,6 +430,7 @@ static int mpls_forward(struct sk_buff *skb, struct net_device *dev,
 	skb->dev = out_dev;
 	skb->protocol = htons(ETH_P_MPLS_UC);
 
+	dec.ttl -= 1;
 	if (unlikely(!new_header_size && dec.bos)) {
 		/* Penultimate hop popping */
 		if (!mpls_egress(dev_net(out_dev), rt, skb, dec))
@@ -1017,7 +1019,6 @@ static int mpls_route_add(struct mpls_route_config *cfg,
 		goto errout;
 	}
 
-	err = -ENOMEM;
 	rt = mpls_rt_alloc(nhs, max_via_alen, max_labels);
 	if (IS_ERR(rt)) {
 		err = PTR_ERR(rt);
@@ -1078,9 +1079,9 @@ static void mpls_get_stats(struct mpls_dev *mdev,
 
 		p = per_cpu_ptr(mdev->stats, i);
 		do {
-			start = u64_stats_fetch_begin(&p->syncp);
+			start = u64_stats_fetch_begin_irq(&p->syncp);
 			local = p->stats;
-		} while (u64_stats_fetch_retry(&p->syncp, start));
+		} while (u64_stats_fetch_retry_irq(&p->syncp, start));
 
 		stats->rx_packets	+= local.rx_packets;
 		stats->rx_bytes		+= local.rx_bytes;
@@ -1427,6 +1428,7 @@ static int mpls_dev_sysctl_register(struct net_device *dev,
 free:
 	kfree(table);
 out:
+	mdev->sysctl = NULL;
 	return -ENOBUFS;
 }
 
@@ -1435,6 +1437,9 @@ static void mpls_dev_sysctl_unregister(struct net_device *dev,
 {
 	struct net *net = dev_net(dev);
 	struct ctl_table *table;
+
+	if (!mdev->sysctl)
+		return;
 
 	table = mdev->sysctl->ctl_table_arg;
 	unregister_net_sysctl_table(mdev->sysctl);

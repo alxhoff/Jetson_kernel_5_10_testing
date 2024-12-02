@@ -15,6 +15,7 @@
 #include <linux/mmc/card.h>
 #include <linux/mmc/pm.h>
 #include <linux/dma-direction.h>
+#include <linux/keyslot-manager.h>
 
 struct mmc_ios {
 	unsigned int	clock;			/* clock rate */
@@ -60,7 +61,8 @@ struct mmc_ios {
 #define MMC_TIMING_MMC_DDR52	8
 #define MMC_TIMING_MMC_HS200	9
 #define MMC_TIMING_MMC_HS400	10
-#define MMC_TIMING_COUNTER	11
+#define MMC_TIMING_SD_EXP	11
+#define MMC_TIMING_SD_EXP_1_2V	12
 
 	unsigned char	signal_voltage;		/* signalling voltage (1.8V or 3.3V) */
 
@@ -76,6 +78,17 @@ struct mmc_ios {
 #define MMC_SET_DRIVER_TYPE_D	3
 
 	bool enhanced_strobe;			/* hs400es selection */
+};
+
+struct mmc_clk_phase {
+	bool valid;
+	u16 in_deg;
+	u16 out_deg;
+};
+
+#define MMC_NUM_CLK_PHASES (MMC_TIMING_MMC_HS400 + 1)
+struct mmc_clk_phase_map {
+	struct mmc_clk_phase phase[MMC_NUM_CLK_PHASES];
 };
 
 struct mmc_host;
@@ -140,7 +153,7 @@ struct mmc_host_ops {
 
 	int	(*start_signal_voltage_switch)(struct mmc_host *host, struct mmc_ios *ios);
 
-	/* Check if the card is pulling dat[0:3] low */
+	/* Check if the card is pulling dat[0] low */
 	int	(*card_busy)(struct mmc_host *host);
 
 	/* The tuning command opcode value is different for SD and eMMC cards */
@@ -174,9 +187,9 @@ struct mmc_host_ops {
 	 */
 	int	(*multi_io_quirk)(struct mmc_card *card,
 				  unsigned int direction, int blk_size);
-	void	(*voltage_switch_req)(struct mmc_host *host, bool req);
-	void	(*skip_host_clkgate)(struct mmc_host *host, bool req);
-	int	(*pre_card_init)(struct mmc_host *host, int val, unsigned int mask);
+
+	/* Initialize an SD express card, mandatory for MMC_CAP2_SD_EXP. */
+	int	(*init_sd_express)(struct mmc_host *host, struct mmc_ios *ios);
 };
 
 struct mmc_cqe_ops {
@@ -221,10 +234,6 @@ struct mmc_cqe_ops {
 	 * will have zero data bytes transferred.
 	 */
 	void	(*cqe_recovery_finish)(struct mmc_host *host);
-	/* Set CMDQ_EN bit in the CQE_CFG register */
-	void	(*cqe_mode_enable)(struct mmc_host *host);
-	/* Clear CMDQ_EN bit in the CQE_CFG register */
-	void	(*cqe_mode_disable)(struct mmc_host *host);
 };
 
 struct mmc_async_req {
@@ -274,8 +283,6 @@ struct mmc_pwrseq;
 struct mmc_supply {
 	struct regulator *vmmc;		/* Card power supply */
 	struct regulator *vqmmc;	/* Optional Vccq supply */
-	struct regulator *vdd2;		/* VDD2 supply for SD Express mode */
-	struct regulator *vdd3;		/* VDD3 supply for SD Express mode */
 };
 
 struct mmc_ctx {
@@ -317,10 +324,6 @@ struct mmc_host {
 #define MMC_VDD_33_34		0x00200000	/* VDD voltage 3.3 ~ 3.4 */
 #define MMC_VDD_34_35		0x00400000	/* VDD voltage 3.4 ~ 3.5 */
 #define MMC_VDD_35_36		0x00800000	/* VDD voltage 3.5 ~ 3.6 */
-#define MMC_VDD_27_36	(MMC_VDD_26_27 | MMC_VDD_27_28 |	\
-	MMC_VDD_28_29 | MMC_VDD_29_30 | MMC_VDD_30_31 |	\
-	MMC_VDD_31_32 | MMC_VDD_32_33 | MMC_VDD_33_34 |	\
-	MMC_VDD_34_35 | MMC_VDD_35_36)
 
 	u32			caps;		/* Host capabilities */
 
@@ -369,6 +372,8 @@ struct mmc_host {
 #define MMC_CAP2_HS200_1_2V_SDR	(1 << 6)        /* can support */
 #define MMC_CAP2_HS200		(MMC_CAP2_HS200_1_8V_SDR | \
 				 MMC_CAP2_HS200_1_2V_SDR)
+#define MMC_CAP2_SD_EXP		(1 << 7)	/* SD express via PCIe */
+#define MMC_CAP2_SD_EXP_1_2V	(1 << 8)	/* SD express 1.2V */
 #define MMC_CAP2_CD_ACTIVE_HIGH	(1 << 10)	/* Card-detect signal active high */
 #define MMC_CAP2_RO_ACTIVE_HIGH	(1 << 11)	/* Write-protect signal active high */
 #define MMC_CAP2_NO_PRESCAN_POWERUP (1 << 14)	/* Don't power up before scan */
@@ -388,11 +393,12 @@ struct mmc_host {
 #define MMC_CAP2_CQE_DCMD	(1 << 24)	/* CQE can issue a direct command */
 #define MMC_CAP2_AVOID_3_3V	(1 << 25)	/* Host must negotiate down from 3.3V */
 #define MMC_CAP2_MERGE_CAPABLE	(1 << 26)	/* Host can merge a segment over the segment size */
-#define MMC_CAP2_ONLY_1V8_SIGNAL_VOLTAGE	(1 << 27)	/* Supports only 1V8 voltage */
-#define MMC_CAP2_FORCE_RESCAN	(1 << 28) /* Force rescan requests for the device if this cap is set */
-#define MMC_CAP2_PERIODIC_CACHE_FLUSH	(1 << 29) /* Periodic cache flush support */
-#define MMC_CAP2_BROKEN_CARD_BUSY_DETECT (1 << 30) /* Broken card busy status detection */
-#define MMC_CAP2_SD_EXPRESS_SUPPORT (1 << 31)    /* Can support for SD express mode */
+#ifdef CONFIG_MMC_CRYPTO
+#define MMC_CAP2_CRYPTO		(1 << 27)	/* Host supports inline encryption */
+#else
+#define MMC_CAP2_CRYPTO		0
+#endif
+#define MMC_CAP2_ALT_GPT_TEGRA	(1 << 28)	/* Host with eMMC that has GPT entry at a non-standard location */
 
 	int			fixed_drv_type;	/* fixed driver type for non-removable media */
 
@@ -415,15 +421,14 @@ struct mmc_host {
 	/* group bitfields together to minimize padding */
 	unsigned int		use_spi_crc:1;
 	unsigned int		claimed:1;	/* host exclusively claimed */
-	unsigned int		bus_dead:1;	/* bus has been released */
 	unsigned int		doing_init_tune:1; /* initial tuning in progress */
 	unsigned int		can_retune:1;	/* re-tuning can be used */
 	unsigned int		doing_retune:1;	/* re-tuning in progress */
 	unsigned int		retune_now:1;	/* do re-tuning at next req */
 	unsigned int		retune_paused:1; /* re-tuning is temporarily disabled */
-	unsigned int		use_blk_mq:1;	/* use blk-mq */
 	unsigned int		retune_crc_disable:1; /* don't trigger retune upon crc */
 	unsigned int		can_dma_map_merge:1; /* merging can be used */
+	unsigned int		vqmmc_enabled:1; /* vqmmc regulator is enabled */
 
 	int			rescan_disable;	/* disable card detection */
 	int			rescan_entered;	/* used with nonremovable devices */
@@ -434,11 +439,7 @@ struct mmc_host {
 	struct timer_list	retune_timer;	/* for periodic re-tuning */
 
 	bool			trigger_card_event; /* card_event necessary */
-	bool			skip_host_clkgate; /* Skip host clock gating */
-	bool			rem_card_present;	/* Removable card status */
-	bool			cd_cap_invert;		/* invert capability status */
 
-	bool			is_card_sd_express;	/* Card is in SD express mode */
 	struct mmc_card		*card;		/* device attached to this host */
 
 	wait_queue_head_t	wq;
@@ -451,7 +452,6 @@ struct mmc_host {
 	struct mmc_slot		slot;
 
 	const struct mmc_bus_ops *bus_ops;	/* current bus driver */
-	unsigned int		bus_refs;	/* reference counter */
 
 	unsigned int		sdio_irqs;
 	struct task_struct	*sdio_irq_thread;
@@ -491,12 +491,10 @@ struct mmc_host {
 	bool			cqe_enabled;
 	bool			cqe_on;
 
-
-	/* Periodic cache flush support */
-	bool			cache_flush_needed;
-	bool			en_periodic_cflush;
-	unsigned int		flush_timeout;
-	struct timer_list	flush_timer;
+	/* Inline encryption support */
+#ifdef CONFIG_MMC_CRYPTO
+	struct blk_keyslot_manager ksm;
+#endif
 
 	/* Host Software Queue support */
 	bool			hsq_enabled;
@@ -510,11 +508,10 @@ struct mmc_host *mmc_alloc_host(int extra, struct device *);
 int mmc_add_host(struct mmc_host *);
 void mmc_remove_host(struct mmc_host *);
 void mmc_free_host(struct mmc_host *);
+void mmc_of_parse_clk_phase(struct mmc_host *host,
+			    struct mmc_clk_phase_map *map);
 int mmc_of_parse(struct mmc_host *host);
-int mmc_of_parse_voltage(struct device_node *np, u32 *mask);
-int mmc_power_save_host(struct mmc_host *host);
-int mmc_power_restore_host(struct mmc_host *host);
-
+int mmc_of_parse_voltage(struct mmc_host *host, u32 *mask);
 
 static inline void *mmc_priv(struct mmc_host *host)
 {
@@ -578,6 +575,8 @@ static inline int mmc_regulator_set_vqmmc(struct mmc_host *mmc,
 #endif
 
 int mmc_regulator_get_supply(struct mmc_host *mmc);
+int mmc_regulator_enable_vqmmc(struct mmc_host *mmc);
+void mmc_regulator_disable_vqmmc(struct mmc_host *mmc);
 
 static inline int mmc_card_is_removable(struct mmc_host *host)
 {
@@ -637,6 +636,6 @@ static inline enum dma_data_direction mmc_get_dma_dir(struct mmc_data *data)
 }
 
 int mmc_send_tuning(struct mmc_host *host, u32 opcode, int *cmd_error);
-int mmc_abort_tuning(struct mmc_host *host, u32 opcode);
+int mmc_send_abort_tuning(struct mmc_host *host, u32 opcode);
 
 #endif /* LINUX_MMC_HOST_H */

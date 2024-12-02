@@ -11,6 +11,8 @@
  * Copyright (C) 2007 Marvell Ltd.
  */
 
+#define pr_fmt(fmt) "kprobes: " fmt
+
 #include <linux/kernel.h>
 #include <linux/kprobes.h>
 #include <linux/module.h>
@@ -231,7 +233,7 @@ singlestep(struct kprobe *p, struct pt_regs *regs, struct kprobe_ctlblk *kcb)
  * kprobe, and that level is reserved for user kprobe handlers, so we can't
  * risk encountering a new kprobe in an interrupt handler.
  */
-void __kprobes kprobe_handler(struct pt_regs *regs)
+static void __kprobes kprobe_handler(struct pt_regs *regs)
 {
 	struct kprobe *p, *cur;
 	struct kprobe_ctlblk *kcb;
@@ -278,7 +280,7 @@ void __kprobes kprobe_handler(struct pt_regs *regs)
 				break;
 			case KPROBE_REENTER:
 				/* A nested probe was hit in FIQ, it is a BUG */
-				pr_warn("Unrecoverable kprobe detected.\n");
+				pr_warn("Failed to recover from reentered kprobes.\n");
 				dump_kprobe(p);
 				fallthrough;
 			default:
@@ -348,29 +350,6 @@ int __kprobes kprobe_fault_handler(struct pt_regs *regs, unsigned int fsr)
 			reset_current_kprobe();
 		}
 		break;
-
-	case KPROBE_HIT_ACTIVE:
-	case KPROBE_HIT_SSDONE:
-		/*
-		 * We increment the nmissed count for accounting,
-		 * we can also use npre/npostfault count for accounting
-		 * these specific fault cases.
-		 */
-		kprobes_inc_nmissed_count(cur);
-
-		/*
-		 * We come here because instructions in the pre/post
-		 * handler caused the page_fault, this could happen
-		 * if handler tries to access user space by
-		 * copy_from_user(), get_user() etc. Let the
-		 * user-specified handler try to fix it.
-		 */
-		if (cur->fault_handler && cur->fault_handler(cur, regs, fsr))
-			return 1;
-		break;
-
-	default:
-		break;
 	}
 
 	return 0;
@@ -394,7 +373,7 @@ int __kprobes kprobe_exceptions_notify(struct notifier_block *self,
  * for kretprobe handlers which should normally be interested in r0 only
  * anyway.
  */
-void __naked __kprobes kretprobe_trampoline(void)
+void __naked __kprobes __kretprobe_trampoline(void)
 {
 	__asm__ __volatile__ (
 		"stmdb	sp!, {r0 - r11}		\n\t"
@@ -410,11 +389,10 @@ void __naked __kprobes kretprobe_trampoline(void)
 		: : : "memory");
 }
 
-/* Called from kretprobe_trampoline */
+/* Called from __kretprobe_trampoline */
 static __used __kprobes void *trampoline_handler(struct pt_regs *regs)
 {
-	return (void *)kretprobe_trampoline_handler(regs, &kretprobe_trampoline,
-						    (void *)regs->ARM_fp);
+	return (void *)kretprobe_trampoline_handler(regs, (void *)regs->ARM_fp);
 }
 
 void __kprobes arch_prepare_kretprobe(struct kretprobe_instance *ri,
@@ -424,7 +402,7 @@ void __kprobes arch_prepare_kretprobe(struct kretprobe_instance *ri,
 	ri->fp = (void *)regs->ARM_fp;
 
 	/* Replace the return addr with trampoline addr. */
-	regs->ARM_lr = (unsigned long)&kretprobe_trampoline;
+	regs->ARM_lr = (unsigned long)&__kretprobe_trampoline;
 }
 
 int __kprobes arch_trampoline_kprobe(struct kprobe *p)

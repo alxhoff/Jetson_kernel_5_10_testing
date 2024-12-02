@@ -493,6 +493,7 @@ enum lm90_temp11_reg_index {
 
 struct lm90_data {
 	struct i2c_client *client;
+	struct device *hwmon_dev;
 	u32 channel_config[4];
 	struct hwmon_channel_info temp_info;
 	const struct hwmon_channel_info *info[3];
@@ -848,7 +849,7 @@ static int lm90_update_device(struct device *dev)
 		 * Re-enable ALERT# output if it was originally enabled and
 		 * relevant alarms are all clear
 		 */
-		if (!(data->config_orig & 0x80) &&
+		if ((client->irq || !(data->config_orig & 0x80)) &&
 		    !(data->alarms & data->alert_alarms)) {
 			if (data->config & 0x80) {
 				dev_dbg(&client->dev, "Re-enabling ALERT#\n");
@@ -1058,10 +1059,16 @@ static int lm90_set_temp11(struct lm90_data *data, int index, long val)
 	int err;
 
 	/* +16 degrees offset for temp2 for the LM99 */
-	if (data->kind == lm99 && index <= 2)
+	if (data->kind == lm99 && index <= 2) {
+		/* prevent integer underflow */
+		val = max(val, -128000l);
 		val -= 16000;
+	}
 
-	if (data->flags & LM90_HAVE_EXTENDED_TEMP)
+	/* Support negative remote offset for the TMP451 */
+	if (data->kind == tmp451 && index == REMOTE_OFFSET)
+		data->temp11[index] = temp_to_s16(val);
+	else if (data->flags & LM90_HAVE_EXTENDED_TEMP)
 		data->temp11[index] = temp_to_u16_adt7461(data, val);
 	else if (data->kind == max6646)
 		data->temp11[index] = temp_to_u8(val) << 8;
@@ -1118,8 +1125,11 @@ static int lm90_set_temp8(struct lm90_data *data, int index, long val)
 	int err;
 
 	/* +16 degrees offset for temp2 for the LM99 */
-	if (data->kind == lm99 && index == 3)
+	if (data->kind == lm99 && index == 3) {
+		/* prevent integer underflow */
+		val = max(val, -128000l);
 		val -= 16000;
+	}
 
 	if (data->flags & LM90_HAVE_EXTENDED_TEMP)
 		data->temp8[index] = temp_to_u8_adt7461(data, val);
@@ -1165,6 +1175,9 @@ static int lm90_set_temphyst(struct lm90_data *data, long val)
 		temp = temp_from_u8(data->temp8[LOCAL_CRIT]);
 	else
 		temp = temp_from_s8(data->temp8[LOCAL_CRIT]);
+
+	/* prevent integer overflow/underflow */
+	val = clamp_val(val, -128000l, 255000l);
 
 	data->temp_hyst = hyst_to_reg(temp - val);
 	err = i2c_smbus_write_byte_data(client, LM90_REG_W_TCRIT_HYST,
@@ -1744,10 +1757,65 @@ static int lm90_init_client(struct i2c_client *client, struct lm90_data *data)
 	if (data->kind == max6696)
 		config &= ~0x08;
 
+	/*
+	 * Interrupt is enabled by default on reset, but it may be disabled
+	 * by bootloader, unmask it.
+	 */
+	if (client->irq)
+		config &= ~0x80;
+
 	config &= 0xBF;	/* run */
 	lm90_update_confreg(data, config);
 
 	return devm_add_action_or_reset(&client->dev, lm90_restore_conf, data);
+}
+
+static void lm90_init_limits(struct lm90_data *data)
+{
+	struct device_node *np;
+	struct device *dev;
+	int offset;
+	u32 val;
+
+	if (!data || !data->client) return;
+
+	np = data->client->dev.of_node;
+	dev = &data->client->dev;
+	if (!of_property_read_u32(np, "local-max", &val))
+		if (lm90_temp_write(dev, hwmon_temp_max, 0, val))
+			dev_warn(dev, "Unable to set max limit for local sensor\n");
+
+	if (!of_property_read_u32(np, "remote-max", &val))
+		if (lm90_temp_write(dev, hwmon_temp_max, 1, val))
+			dev_warn(dev, "Unable to set max limit for remote sensor\n");
+
+	if (data->flags & LM90_HAVE_CRIT) {
+		if (!of_property_read_u32(np, "local-crit", &val))
+			if (lm90_temp_write(dev, hwmon_temp_crit, 0, val))
+				dev_warn(dev, "Unable to set crit limit for local sensor\n");
+
+		if (!of_property_read_u32(np, "remote-crit", &val))
+			if (lm90_temp_write(dev, hwmon_temp_crit, 1, val))
+				dev_warn(dev, "Unable to set crit limit for remote sensor\n");
+	}
+
+	if (data->flags & LM90_HAVE_TEMP3) {
+		if (!of_property_read_u32(np, "remote2-max", &val)) {
+			if (lm90_temp_write(dev, hwmon_temp_max, 2, val))
+				dev_warn(dev, "Unable to set max limit for second remote sensor\n");
+		}
+
+		if (!of_property_read_u32(np, "remote2-crit", &val)) {
+			if (lm90_temp_write(dev, hwmon_temp_crit, 2, val))
+				dev_warn(dev,
+					 "Unable to set crit limit for second remote sensor\n");
+		}
+	}
+
+	if (data->flags & LM90_HAVE_OFFSET)
+		if (!of_property_read_s32(np, "remote-offset", &offset))
+			if (lm90_temp_write(dev, hwmon_temp_offset, 1, offset))
+				dev_warn(dev, "Unable to set offset for remote sensor\n");
 }
 
 static bool lm90_is_tripped(struct i2c_client *client, u16 *status)
@@ -1772,22 +1840,41 @@ static bool lm90_is_tripped(struct i2c_client *client, u16 *status)
 
 	if ((st & (LM90_STATUS_LLOW | LM90_STATUS_LHIGH | LM90_STATUS_LTHRM)) ||
 	    (st2 & MAX6696_STATUS2_LOT2))
-		dev_warn(&client->dev,
-			 "temp%d out of range, please check!\n", 1);
+		dev_dbg(&client->dev,
+			"temp%d out of range, please check!\n", 1);
 	if ((st & (LM90_STATUS_RLOW | LM90_STATUS_RHIGH | LM90_STATUS_RTHRM)) ||
 	    (st2 & MAX6696_STATUS2_ROT2))
-		dev_warn(&client->dev,
-			 "temp%d out of range, please check!\n", 2);
+		dev_dbg(&client->dev,
+			"temp%d out of range, please check!\n", 2);
 	if (st & LM90_STATUS_ROPEN)
-		dev_warn(&client->dev,
-			 "temp%d diode open, please check!\n", 2);
+		dev_dbg(&client->dev,
+			"temp%d diode open, please check!\n", 2);
 	if (st2 & (MAX6696_STATUS2_R2LOW | MAX6696_STATUS2_R2HIGH |
 		   MAX6696_STATUS2_R2THRM | MAX6696_STATUS2_R2OT2))
-		dev_warn(&client->dev,
-			 "temp%d out of range, please check!\n", 3);
+		dev_dbg(&client->dev,
+			"temp%d out of range, please check!\n", 3);
 	if (st2 & MAX6696_STATUS2_R2OPEN)
-		dev_warn(&client->dev,
-			 "temp%d diode open, please check!\n", 3);
+		dev_dbg(&client->dev,
+			"temp%d diode open, please check!\n", 3);
+
+	if (st & LM90_STATUS_LLOW)
+		hwmon_notify_event(data->hwmon_dev, hwmon_temp,
+				   hwmon_temp_min_alarm, 0);
+	if (st & LM90_STATUS_RLOW)
+		hwmon_notify_event(data->hwmon_dev, hwmon_temp,
+				   hwmon_temp_min_alarm, 1);
+	if (st2 & MAX6696_STATUS2_R2LOW)
+		hwmon_notify_event(data->hwmon_dev, hwmon_temp,
+				   hwmon_temp_min_alarm, 2);
+	if (st & LM90_STATUS_LHIGH)
+		hwmon_notify_event(data->hwmon_dev, hwmon_temp,
+				   hwmon_temp_max_alarm, 0);
+	if (st & LM90_STATUS_RHIGH)
+		hwmon_notify_event(data->hwmon_dev, hwmon_temp,
+				   hwmon_temp_max_alarm, 1);
+	if (st2 & MAX6696_STATUS2_R2HIGH)
+		hwmon_notify_event(data->hwmon_dev, hwmon_temp,
+				   hwmon_temp_max_alarm, 2);
 
 	return true;
 }
@@ -1929,6 +2016,10 @@ static int lm90_probe(struct i2c_client *client)
 		return err;
 	}
 
+	/* Initialize the limits defined in the device-tree if any */
+	if (client->dev.of_node)
+		lm90_init_limits(data);
+
 	/*
 	 * The 'pec' attribute is attached to the i2c device and thus created
 	 * separately.
@@ -1948,12 +2039,13 @@ static int lm90_probe(struct i2c_client *client)
 	if (IS_ERR(hwmon_dev))
 		return PTR_ERR(hwmon_dev);
 
+	data->hwmon_dev = hwmon_dev;
+
 	if (client->irq) {
 		dev_dbg(dev, "IRQ: %d\n", client->irq);
 		err = devm_request_threaded_irq(dev, client->irq,
 						NULL, lm90_irq_thread,
-						IRQF_TRIGGER_LOW | IRQF_ONESHOT,
-						"lm90", client);
+						IRQF_ONESHOT, "lm90", client);
 		if (err < 0) {
 			dev_err(dev, "cannot request IRQ %d\n", client->irq);
 			return err;
@@ -1985,15 +2077,40 @@ static void lm90_alert(struct i2c_client *client, enum i2c_alert_protocol type,
 			lm90_update_confreg(data, data->config | 0x80);
 		}
 	} else {
-		dev_info(&client->dev, "Everything OK\n");
+		dev_dbg(&client->dev, "Everything OK\n");
 	}
 }
+
+static int __maybe_unused lm90_suspend(struct device *dev)
+{
+	struct lm90_data *data = dev_get_drvdata(dev);
+	struct i2c_client *client = data->client;
+
+	if (client->irq)
+		disable_irq(client->irq);
+
+	return 0;
+}
+
+static int __maybe_unused lm90_resume(struct device *dev)
+{
+	struct lm90_data *data = dev_get_drvdata(dev);
+	struct i2c_client *client = data->client;
+
+	if (client->irq)
+		enable_irq(client->irq);
+
+	return 0;
+}
+
+static SIMPLE_DEV_PM_OPS(lm90_pm_ops, lm90_suspend, lm90_resume);
 
 static struct i2c_driver lm90_driver = {
 	.class		= I2C_CLASS_HWMON,
 	.driver = {
 		.name	= "lm90",
 		.of_match_table = of_match_ptr(lm90_of_match),
+		.pm	= &lm90_pm_ops,
 	},
 	.probe_new	= lm90_probe,
 	.alert		= lm90_alert,

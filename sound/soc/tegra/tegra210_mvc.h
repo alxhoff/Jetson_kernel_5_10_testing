@@ -2,7 +2,7 @@
 /*
  * tegra210_mvc.h - Definitions for Tegra210 MVC driver
  *
- * Copyright (c) 2014-2021 NVIDIA CORPORATION.  All rights reserved.
+ * Copyright (c) 2021 NVIDIA CORPORATION.  All rights reserved.
  *
  */
 
@@ -10,8 +10,8 @@
 #define __TEGRA210_MVC_H__
 
 /*
- * MVC_RX registers are with respect to AXBAR.
- * The data is coming from AXBAR to MVC for playback.
+ * MVC_RX registers are with respect to XBAR.
+ * The data comes from XBAR to MVC.
  */
 #define TEGRA210_MVC_RX_STATUS			0x0c
 #define TEGRA210_MVC_RX_INT_STATUS		0x10
@@ -19,12 +19,10 @@
 #define TEGRA210_MVC_RX_INT_SET			0x18
 #define TEGRA210_MVC_RX_INT_CLEAR		0x1c
 #define TEGRA210_MVC_RX_CIF_CTRL		0x20
-#define TEGRA210_MVC_RX_CYA			0x24
-#define TEGRA210_MVC_RX_DBG			0x28
 
 /*
- * MVC_TX registers are with respect to AXBAR.
- * The data is going out of MVC for playback.
+ * MVC_TX registers are with respect to XBAR.
+ * The data goes out of MVC.
  */
 #define TEGRA210_MVC_TX_STATUS			0x4c
 #define TEGRA210_MVC_TX_INT_STATUS		0x50
@@ -32,8 +30,6 @@
 #define TEGRA210_MVC_TX_INT_SET			0x58
 #define TEGRA210_MVC_TX_INT_CLEAR		0x5c
 #define TEGRA210_MVC_TX_CIF_CTRL		0x60
-#define TEGRA210_MVC_TX_CYA			0x64
-#define TEGRA210_MVC_TX_DBG			0x68
 
 /* Register offsets from TEGRA210_MVC*_BASE */
 #define TEGRA210_MVC_ENABLE			0x80
@@ -54,8 +50,6 @@
 #define TEGRA210_MVC_CFG_RAM_DATA		0x108
 #define TEGRA210_MVC_PEAK_VALUE			0x10c
 #define TEGRA210_MVC_CONFIG_ERR_TYPE		0x12c
-#define TEGRA210_MVC_CYA			0x130
-#define TEGRA210_MVC_DBG			0x138
 
 /* Fields in TEGRA210_MVC_ENABLE */
 #define TEGRA210_MVC_EN_SHIFT			0
@@ -66,7 +60,6 @@
 #define TEGRA210_MVC_MUTE_MASK			(TEGRA210_MUTE_MASK_EN << TEGRA210_MVC_MUTE_SHIFT)
 #define TEGRA210_MVC_MUTE_EN			(TEGRA210_MUTE_MASK_EN << TEGRA210_MVC_MUTE_SHIFT)
 #define TEGRA210_MVC_CH0_MUTE_EN		1
-#define TEGRA210_MVC_CH0_MUTE_MASK		(TEGRA210_MVC_CH0_MUTE_EN << TEGRA210_MVC_MUTE_SHIFT)
 
 #define TEGRA210_MVC_PER_CHAN_CTRL_EN_SHIFT	30
 #define TEGRA210_MVC_PER_CHAN_CTRL_EN_MASK	(1 << TEGRA210_MVC_PER_CHAN_CTRL_EN_SHIFT)
@@ -82,9 +75,6 @@
 
 #define TEGRA210_MVC_INIT_VOL_DEFAULT_POLY	0x01000000
 #define TEGRA210_MVC_INIT_VOL_DEFAULT_LINEAR	0x00000000
-
-#define TEGRA210_MVC_BYPASS_MODE_SHIFT		31
-#define TEGRA210_MVC_BYPASS_MODE_MASK		(1 << TEGRA210_MVC_BYPASS_MODE_SHIFT)
 
 /* Fields in TEGRA210_MVC ram ctrl */
 #define TEGRA210_MVC_CFG_RAM_CTRL_RW_SHIFT		14
@@ -103,22 +93,30 @@
 #define TEGRA210_MVC_MAX_CHAN_COUNT 8
 #define TEGRA210_MVC_REG_OFFSET(reg, i) (reg + (REG_SIZE * i))
 
+#define TEGRA210_MVC_GET_CHAN(reg, base) (((reg) - (base)) / REG_SIZE)
+
+#define TEGRA210_GET_MUTE_VAL(val) (((val) >> TEGRA210_MVC_MUTE_SHIFT) & TEGRA210_MUTE_MASK_EN)
+
+#define NUM_GAIN_POLY_COEFFS 9
+
 enum {
 	CURVE_POLY,
 	CURVE_LINEAR,
 };
 
+struct tegra210_mvc_gain_params {
+	int poly_coeff[NUM_GAIN_POLY_COEFFS];
+	int poly_n1;
+	int poly_n2;
+	int duration;
+	int duration_inv;
+};
+
 struct tegra210_mvc {
-	struct regmap *regmap;
-	int poly_coeff[9];
-	int poly_n1, poly_n2, duration, duration_inv;
 	int volume[TEGRA210_MVC_MAX_CHAN_COUNT];
 	unsigned int curve_type;
 	unsigned int ctrl_value;
-	unsigned int cif_channels;
-	unsigned int audio_bits;
-	unsigned int format_in;
-	bool bypass_mode;
+	struct regmap *regmap;
 };
 
 #endif

@@ -350,6 +350,8 @@ union ks8851_tx_hdr {
  * @rxd: Space for receiving SPI data, in DMA-able space.
  * @txd: Space for transmitting SPI data, in DMA-able space.
  * @msg_enable: The message flags controlling driver output (see ethtool).
+ * @tx_space: Free space in the hardware TX buffer (cached copy of KS_TXMIR).
+ * @queued_len: Space required in hardware TX buffer for queued packets in txq.
  * @fid: Incrementing frame id tag.
  * @rc_ier: Cached copy of KS_IER.
  * @rc_ccr: Cached copy of KS_CCR.
@@ -358,6 +360,7 @@ union ks8851_tx_hdr {
  * @vdd_reg:	Optional regulator supplying the chip
  * @vdd_io: Optional digital power supply for IO
  * @gpio: Optional reset_n gpio
+ * @mii_bus: Pointer to MII bus structure
  * @lock: Bus access lock callback
  * @unlock: Bus access unlock callback
  * @rdreg16: 16bit register read callback
@@ -398,11 +401,13 @@ struct ks8851_net {
 	struct work_struct	rxctrl_work;
 
 	struct sk_buff_head	txq;
+	unsigned int		queued_len;
 
 	struct eeprom_93cx6	eeprom;
 	struct regulator	*vdd_reg;
 	struct regulator	*vdd_io;
 	int			gpio;
+	struct mii_bus		*mii_bus;
 
 	void			(*lock)(struct ks8851_net *ks,
 					unsigned long *flags);

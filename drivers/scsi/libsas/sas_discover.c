@@ -16,7 +16,7 @@
 #include <scsi/scsi_transport.h>
 #include <scsi/scsi_transport_sas.h>
 #include <scsi/sas_ata.h>
-#include "../scsi_sas_internal.h"
+#include "scsi_sas_internal.h"
 
 /* ---------- Basic task processing for discovery purposes ---------- */
 
@@ -75,7 +75,7 @@ static int sas_get_port_device(struct asd_sas_port *port)
 		struct dev_to_host_fis *fis =
 			(struct dev_to_host_fis *) dev->frame_rcvd;
 		if (fis->interrupt_reason == 1 && fis->lbal == 1 &&
-		    fis->byte_count_low==0x69 && fis->byte_count_high == 0x96
+		    fis->byte_count_low == 0x69 && fis->byte_count_high == 0x96
 		    && (fis->device & ~0x10) == 0)
 			dev->dev_type = SAS_SATA_PM;
 		else
@@ -343,13 +343,11 @@ void sas_destruct_devices(struct asd_sas_port *port)
 	struct domain_device *dev, *n;
 
 	list_for_each_entry_safe(dev, n, &port->destroy_list, disco_list_node) {
-		struct sas_port *sas_port = dev_to_sas_port(dev->rphy->dev.parent);
 		list_del_init(&dev->disco_list_node);
 
 		sas_remove_children(&dev->rphy->dev);
 		sas_rphy_delete(dev->rphy);
 		sas_unregister_common_dev(port, dev);
-		sas_port_delete(sas_port);
 	}
 }
 
@@ -392,6 +390,9 @@ void sas_unregister_domain_devices(struct asd_sas_port *port, int gone)
 
 	list_for_each_entry_safe(dev, n, &port->disco_list, disco_list_node)
 		sas_unregister_dev(port, dev);
+
+	port->port->rphy = NULL;
+
 }
 
 void sas_device_set_phy(struct domain_device *dev, struct sas_port *port)
@@ -460,7 +461,7 @@ static void sas_discover_domain(struct work_struct *work)
 		break;
 #else
 		pr_notice("ATA device seen but CONFIG_SCSI_SAS_ATA=N so cannot attach\n");
-		/* Fall through */
+		fallthrough;
 #endif
 		/* Fall through - only for the #else condition above. */
 	default:

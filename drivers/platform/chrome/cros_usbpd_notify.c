@@ -220,7 +220,8 @@ static int cros_usbpd_notify_plat(struct notifier_block *nb,
 	if (!host_event)
 		return NOTIFY_DONE;
 
-	if (host_event & EC_HOST_EVENT_MASK(EC_HOST_EVENT_PD_MCU)) {
+	if (host_event & (EC_HOST_EVENT_MASK(EC_HOST_EVENT_PD_MCU) |
+			  EC_HOST_EVENT_MASK(EC_HOST_EVENT_USB_MUX))) {
 		cros_usbpd_get_event_and_notify(pdnotify->dev, ec_dev);
 		return NOTIFY_OK;
 	}
@@ -284,7 +285,11 @@ static int __init cros_usbpd_notify_init(void)
 		return ret;
 
 #ifdef CONFIG_ACPI
-	platform_driver_register(&cros_usbpd_notify_acpi_driver);
+	ret = platform_driver_register(&cros_usbpd_notify_acpi_driver);
+	if (ret) {
+		platform_driver_unregister(&cros_usbpd_notify_plat_driver);
+		return ret;
+	}
 #endif
 	return 0;
 }

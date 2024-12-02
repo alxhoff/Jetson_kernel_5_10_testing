@@ -33,6 +33,7 @@
 
 #include "i915_drv.h"
 #include "intel_connector.h"
+#include "intel_de.h"
 #include "intel_display_types.h"
 #include "intel_dvo.h"
 #include "intel_dvo_dev.h"
@@ -219,14 +220,20 @@ static void intel_enable_dvo(struct intel_atomic_state *state,
 }
 
 static enum drm_mode_status
-intel_dvo_mode_valid(struct drm_connector *connector,
+intel_dvo_mode_valid(struct drm_connector *_connector,
 		     struct drm_display_mode *mode)
 {
-	struct intel_dvo *intel_dvo = intel_attached_dvo(to_intel_connector(connector));
-	const struct drm_display_mode *fixed_mode =
-		to_intel_connector(connector)->panel.fixed_mode;
-	int max_dotclk = to_i915(connector->dev)->max_dotclk_freq;
+	struct intel_connector *connector = to_intel_connector(_connector);
+	struct drm_i915_private *i915 = to_i915(connector->base.dev);
+	struct intel_dvo *intel_dvo = intel_attached_dvo(connector);
+	const struct drm_display_mode *fixed_mode = connector->panel.fixed_mode;
+	int max_dotclk = i915->max_dotclk_freq;
 	int target_clock = mode->clock;
+	enum drm_mode_status status;
+
+	status = intel_cpu_transcoder_mode_valid(i915, mode);
+	if (status != MODE_OK)
+		return status;
 
 	if (mode->flags & DRM_MODE_FLAG_DBLSCAN)
 		return MODE_NO_DBLESCAN;
@@ -301,12 +308,8 @@ static void intel_dvo_pre_enable(struct intel_atomic_state *state,
 	if (adjusted_mode->flags & DRM_MODE_FLAG_PVSYNC)
 		dvo_val |= DVO_VSYNC_ACTIVE_HIGH;
 
-	/*I915_WRITE(DVOB_SRCDIM,
-	  (adjusted_mode->crtc_hdisplay << DVO_SRCDIM_HORIZONTAL_SHIFT) |
-	  (adjusted_mode->crtc_vdisplay << DVO_SRCDIM_VERTICAL_SHIFT));*/
 	intel_de_write(dev_priv, dvo_srcdim_reg,
 		       (adjusted_mode->crtc_hdisplay << DVO_SRCDIM_HORIZONTAL_SHIFT) | (adjusted_mode->crtc_vdisplay << DVO_SRCDIM_VERTICAL_SHIFT));
-	/*I915_WRITE(DVOB, dvo_val);*/
 	intel_de_write(dev_priv, dvo_reg, dvo_val);
 }
 

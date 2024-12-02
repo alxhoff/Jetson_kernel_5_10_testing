@@ -16,7 +16,6 @@ description: |
 maintainers:
   - Jon Hunter <jonathanh@nvidia.com>
   - Sameer Pujar <spujar@nvidia.com>
-  - Mohan Kumar D <mkumard@nvidia.com>
 
 properties:
   $nodename:
@@ -56,12 +55,22 @@ properties:
       The name can be "DSPK1" or "DSPKx", where x depends on the maximum
       available instances on a Tegra SoC.
 
-  "#sound-dai-cells":
-    description: cell specifies number of DAIs.
-    const: 1
+  ports:
+    $ref: /schemas/graph.yaml#/properties/ports
+    properties:
+      port@0:
+        $ref: audio-graph-port.yaml#
+        unevaluatedProperties: false
+        description: |
+          DSPK ACIF (Audio Client Interface) port connected to the
+          corresponding AHUB (Audio Hub) ACIF port.
 
-  nvidia,ahub-dspk-id:
-    description: must be specified to uniquely indentify DSPK instance
+      port@1:
+        $ref: audio-graph-port.yaml#
+        unevaluatedProperties: false
+        description: |
+          DSPK DAP (Digital Audio Port) interface which can be connected
+          to external audio codec for playback.
 
 required:
   - compatible
@@ -70,7 +79,7 @@ required:
   - clock-names
   - assigned-clocks
   - assigned-clock-parents
-  - "#sound-dai-cells"
+  - sound-name-prefix
 
 additionalProperties: false
 
@@ -87,8 +96,6 @@ examples:
         assigned-clock-parents = <&bpmp TEGRA186_CLK_PLL_A_OUT0>;
         assigned-clock-rates = <12288000>;
         sound-name-prefix = "DSPK1";
-        #sound-dai-cells = <1>;
-        nvidia,ahub-dspk-id = <0>;
     };
 
 ...

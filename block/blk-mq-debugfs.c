@@ -148,7 +148,7 @@ static ssize_t queue_state_write(void *data, const char __user *buf,
 				 size_t count, loff_t *ppos)
 {
 	struct request_queue *q = data;
-	char opbuf[16] = { 0 }, *op;
+	char opbuf[16] = { }, *op;
 
 	/*
 	 * The "state" attribute is removed after blk_cleanup_queue() has called
@@ -293,7 +293,6 @@ static const char *const cmd_flag_name[] = {
 
 #define RQF_NAME(name) [ilog2((__force u32)RQF_##name)] = #name
 static const char *const rqf_name[] = {
-	RQF_NAME(SORTED),
 	RQF_NAME(STARTED),
 	RQF_NAME(SOFTBARRIER),
 	RQF_NAME(FLUSH_SEQ),
@@ -304,7 +303,6 @@ static const char *const rqf_name[] = {
 	RQF_NAME(QUIET),
 	RQF_NAME(ELVPRIV),
 	RQF_NAME(IO_STAT),
-	RQF_NAME(ALLOCED),
 	RQF_NAME(PM),
 	RQF_NAME(HASHED),
 	RQF_NAME(STATS),
@@ -881,6 +879,9 @@ void blk_mq_debugfs_register_hctx(struct request_queue *q,
 	char name[20];
 	int i;
 
+	if (!q->debugfs_dir)
+		return;
+
 	snprintf(name, sizeof(name), "hctx%u", hctx->queue_num);
 	hctx->debugfs_dir = debugfs_create_dir(name, q->debugfs_dir);
 
@@ -940,6 +941,21 @@ void blk_mq_debugfs_unregister_sched(struct request_queue *q)
 	q->sched_debugfs_dir = NULL;
 }
 
+static const char *rq_qos_id_to_name(enum rq_qos_id id)
+{
+	switch (id) {
+	case RQ_QOS_WBT:
+		return "wbt";
+	case RQ_QOS_LATENCY:
+		return "latency";
+	case RQ_QOS_COST:
+		return "cost";
+	case RQ_QOS_IOPRIO:
+		return "ioprio";
+	}
+	return "unknown";
+}
+
 void blk_mq_debugfs_unregister_rqos(struct rq_qos *rqos)
 {
 	debugfs_remove_recursive(rqos->debugfs_dir);
@@ -974,6 +990,14 @@ void blk_mq_debugfs_register_sched_hctx(struct request_queue *q,
 					struct blk_mq_hw_ctx *hctx)
 {
 	struct elevator_type *e = q->elevator->type;
+
+	/*
+	 * If the parent debugfs directory has not been created yet, return;
+	 * We will be called again later on with appropriate parent debugfs
+	 * directory from blk_register_queue()
+	 */
+	if (!hctx->debugfs_dir)
+		return;
 
 	if (!e->hctx_debugfs_attrs)
 		return;

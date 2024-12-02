@@ -230,7 +230,6 @@ static void meson_mmc_get_transfer_mode(struct mmc_host *mmc,
 	struct mmc_data *data = mrq->data;
 	struct scatterlist *sg;
 	int i;
-	bool use_desc_chain_mode = true;
 
 	/*
 	 * When Controller DMA cannot directly access DDR memory, disable
@@ -240,25 +239,37 @@ static void meson_mmc_get_transfer_mode(struct mmc_host *mmc,
 	if (host->dram_access_quirk)
 		return;
 
-	/*
-	 * Broken SDIO with AP6255-based WiFi on Khadas VIM Pro has been
-	 * reported. For some strange reason this occurs in descriptor
-	 * chain mode only. So let's fall back to bounce buffer mode
-	 * for command SD_IO_RW_EXTENDED.
-	 */
-	if (mrq->cmd->opcode == SD_IO_RW_EXTENDED)
-		return;
-
-	for_each_sg(data->sg, sg, data->sg_len, i)
-		/* check for 8 byte alignment */
-		if (sg->offset & 7) {
-			WARN_ONCE(1, "unaligned scatterlist buffer\n");
-			use_desc_chain_mode = false;
-			break;
+	/* SD_IO_RW_EXTENDED (CMD53) can also use block mode under the hood */
+	if (data->blocks > 1 || mrq->cmd->opcode == SD_IO_RW_EXTENDED) {
+		/*
+		 * In block mode DMA descriptor format, "length" field indicates
+		 * number of blocks and there is no way to pass DMA size that
+		 * is not multiple of SDIO block size, making it impossible to
+		 * tie more than one memory buffer with single SDIO block.
+		 * Block mode sg buffer size should be aligned with SDIO block
+		 * size, otherwise chain mode could not be used.
+		 */
+		for_each_sg(data->sg, sg, data->sg_len, i) {
+			if (sg->length % data->blksz) {
+				dev_warn_once(mmc_dev(mmc),
+					      "unaligned sg len %u blksize %u, disabling descriptor DMA for transfer\n",
+					      sg->length, data->blksz);
+				return;
+			}
 		}
+	}
 
-	if (use_desc_chain_mode)
-		data->host_cookie |= SD_EMMC_DESC_CHAIN_MODE;
+	for_each_sg(data->sg, sg, data->sg_len, i) {
+		/* check for 8 byte alignment */
+		if (sg->offset % 8) {
+			dev_warn_once(mmc_dev(mmc),
+				      "unaligned sg offset %u, disabling descriptor DMA for transfer\n",
+				      sg->offset);
+			return;
+		}
+	}
+
+	data->host_cookie |= SD_EMMC_DESC_CHAIN_MODE;
 }
 
 static inline bool meson_mmc_desc_chain_mode(const struct mmc_data *data)
@@ -800,7 +811,6 @@ static void meson_mmc_start_cmd(struct mmc_host *mmc, struct mmc_command *cmd)
 
 	cmd_cfg |= FIELD_PREP(CMD_CFG_CMD_INDEX_MASK, cmd->opcode);
 	cmd_cfg |= CMD_CFG_OWNER;  /* owned by CPU */
-	cmd_cfg |= CMD_CFG_ERROR; /* stop in case of error */
 
 	meson_mmc_set_response_bits(cmd, &cmd_cfg);
 
@@ -970,11 +980,8 @@ static irqreturn_t meson_mmc_irq(int irq, void *dev_id)
 	if (status & (IRQ_END_OF_CHAIN | IRQ_RESP_STATUS)) {
 		if (data && !cmd->error)
 			data->bytes_xfered = data->blksz * data->blocks;
-		if (meson_mmc_bounce_buf_read(data) ||
-		    meson_mmc_get_next_command(cmd))
-			ret = IRQ_WAKE_THREAD;
-		else
-			ret = IRQ_HANDLED;
+
+		return IRQ_WAKE_THREAD;
 	}
 
 out:
@@ -985,9 +992,6 @@ out:
 		start &= ~START_DESC_BUSY;
 		writel(start, host->regs + SD_EMMC_START);
 	}
-
-	if (ret == IRQ_HANDLED)
-		meson_mmc_request_done(host->mmc, cmd->mrq);
 
 	return ret;
 }
@@ -1161,8 +1165,10 @@ static int meson_mmc_probe(struct platform_device *pdev)
 	}
 
 	ret = device_reset_optional(&pdev->dev);
-	if (ret)
-		return dev_err_probe(&pdev->dev, ret, "device reset failed\n");
+	if (ret) {
+		dev_err_probe(&pdev->dev, ret, "device reset failed\n");
+		goto free_host;
+	}
 
 	res = platform_get_resource(pdev, IORESOURCE_MEM, 0);
 	host->regs = devm_ioremap_resource(&pdev->dev, res);
@@ -1172,8 +1178,8 @@ static int meson_mmc_probe(struct platform_device *pdev)
 	}
 
 	host->irq = platform_get_irq(pdev, 0);
-	if (host->irq <= 0) {
-		ret = -EINVAL;
+	if (host->irq < 0) {
+		ret = host->irq;
 		goto free_host;
 	}
 
@@ -1278,7 +1284,9 @@ static int meson_mmc_probe(struct platform_device *pdev)
 	}
 
 	mmc->ops = &meson_mmc_ops;
-	mmc_add_host(mmc);
+	ret = mmc_add_host(mmc);
+	if (ret)
+		goto err_free_irq;
 
 	return 0;
 
@@ -1351,7 +1359,7 @@ static struct platform_driver meson_mmc_driver = {
 	.driver		= {
 		.name = DRIVER_NAME,
 		.probe_type = PROBE_PREFER_ASYNCHRONOUS,
-		.of_match_table = of_match_ptr(meson_mmc_of_match),
+		.of_match_table = meson_mmc_of_match,
 	},
 };
 

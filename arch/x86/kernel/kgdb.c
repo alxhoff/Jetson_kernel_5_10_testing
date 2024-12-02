@@ -17,7 +17,7 @@
  *  Updated by:	     Tom Rini <trini@kernel.crashing.org>
  *  Updated by:	     Jason Wessel <jason.wessel@windriver.com>
  *  Modified for 386 by Jim Kingdon, Cygnus Support.
- *  Origianl kgdb, compatibility with 2.1.xx kernel by
+ *  Original kgdb, compatibility with 2.1.xx kernel by
  *  David Grothe <dave@gcom.com>
  *  Integrated into 2.2.5 kernel by Tigran Aivazian <tigran@sco.com>
  *  X86_64 changes from Andi Kleen's patch merged by Jim Houston
@@ -502,9 +502,12 @@ static int kgdb_nmi_handler(unsigned int cmd, struct pt_regs *regs)
 		if (atomic_read(&kgdb_active) != -1) {
 			/* KGDB CPU roundup */
 			cpu = raw_smp_processor_id();
-			kgdb_nmicallback(cpu, regs);
-			set_bit(cpu, was_in_debug_nmi);
-			touch_nmi_watchdog();
+
+			if (!kgdb_roundup_delay(cpu)) {
+				kgdb_nmicallback(cpu, regs);
+				set_bit(cpu, was_in_debug_nmi);
+				touch_nmi_watchdog();
+			}
 
 			return NMI_HANDLED;
 		}
@@ -642,7 +645,7 @@ void kgdb_arch_late(void)
 	struct perf_event **pevent;
 
 	/*
-	 * Pre-allocate the hw breakpoint structions in the non-atomic
+	 * Pre-allocate the hw breakpoint instructions in the non-atomic
 	 * portion of kgdb because this operation requires mutexs to
 	 * complete.
 	 */

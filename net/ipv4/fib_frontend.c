@@ -389,7 +389,7 @@ static int __fib_validate_source(struct sk_buff *skb, __be32 src, __be32 dst,
 	dev_match = dev_match || (res.type == RTN_LOCAL &&
 				  dev == net->loopback_dev);
 	if (dev_match) {
-		ret = FIB_RES_NHC(res)->nhc_scope >= RT_SCOPE_HOST;
+		ret = FIB_RES_NHC(res)->nhc_scope >= RT_SCOPE_LINK;
 		return ret;
 	}
 	if (no_addr)
@@ -401,7 +401,7 @@ static int __fib_validate_source(struct sk_buff *skb, __be32 src, __be32 dst,
 	ret = 0;
 	if (fib_lookup(net, &fl4, &res, FIB_LOOKUP_IGNORE_LINKSTATE) == 0) {
 		if (res.type == RTN_UNICAST)
-			ret = FIB_RES_NHC(res)->nhc_scope >= RT_SCOPE_HOST;
+			ret = FIB_RES_NHC(res)->nhc_scope >= RT_SCOPE_LINK;
 	}
 	return ret;
 
@@ -572,6 +572,9 @@ static int rtentry_to_fib_config(struct net *net, int cmd, struct rtentry *rt,
 		    addr_type == RTN_UNICAST)
 			cfg->fc_scope = RT_SCOPE_UNIVERSE;
 	}
+
+	if (!cfg->fc_table)
+		cfg->fc_table = RT_TABLE_MAIN;
 
 	if (cmd == SIOCDELRT)
 		return 0;
@@ -829,6 +832,9 @@ static int rtm_to_fib_config(struct net *net, struct sk_buff *skb,
 			       "Nexthop configuration can not contain both GATEWAY and VIA");
 		return -EINVAL;
 	}
+
+	if (!cfg->fc_table)
+		cfg->fc_table = RT_TABLE_MAIN;
 
 	return 0;
 errout:
@@ -1126,10 +1132,8 @@ void fib_add_ifaddr(struct in_ifaddr *ifa)
 				  prefix, ifa->ifa_prefixlen, prim,
 				  ifa->ifa_rt_priority);
 
-		/* Add network specific broadcasts, when it takes a sense */
+		/* Add the network broadcast address, when it makes sense */
 		if (ifa->ifa_prefixlen < 31) {
-			fib_magic(RTM_NEWROUTE, RTN_BROADCAST, prefix, 32,
-				  prim, 0);
 			fib_magic(RTM_NEWROUTE, RTN_BROADCAST, prefix | ~mask,
 				  32, prim, 0);
 			arp_invalidate(dev, prefix | ~mask, false);
@@ -1381,7 +1385,7 @@ static void nl_fib_input(struct sk_buff *skb)
 	portid = NETLINK_CB(skb).portid;      /* netlink portid */
 	NETLINK_CB(skb).portid = 0;        /* from kernel */
 	NETLINK_CB(skb).dst_group = 0;  /* unicast */
-	netlink_unicast(net->ipv4.fibnl, skb, portid, MSG_DONTWAIT);
+	nlmsg_unicast(net->ipv4.fibnl, skb, portid);
 }
 
 static int __net_init nl_fib_lookup_init(struct net *net)
@@ -1520,6 +1524,12 @@ static int __net_init ip_fib_net_init(struct net *net)
 	err = fib4_notifier_init(net);
 	if (err)
 		return err;
+
+#ifdef CONFIG_IP_ROUTE_MULTIPATH
+	/* Default to 3-tuple */
+	net->ipv4.sysctl_fib_multipath_hash_fields =
+		FIB_MULTIPATH_HASH_FIELD_DEFAULT_MASK;
+#endif
 
 	/* Avoid false sharing : Use at least a full cache line */
 	size = max_t(size_t, size, L1_CACHE_BYTES);

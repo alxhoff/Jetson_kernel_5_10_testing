@@ -4,8 +4,6 @@
  *
  * Copyright (C) 2003,2004 Hewlett-Packard Company
  *
- * Copyright (c) 2022, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
- *
  */
 
 #ifndef _LINUX_BACKLIGHT_H
@@ -111,18 +109,8 @@ enum backlight_scale {
 	BACKLIGHT_SCALE_NON_LINEAR,
 };
 
-enum backlight_device_notification {
-	BACKLIGHT_DEVICE_PRE_BRIGHTNESS_CHANGE,
-	BACKLIGHT_DEVICE_POST_BRIGHTNESS_CHANGE,
-};
-
 struct backlight_device;
 struct fb_info;
-
-struct backlight_device_brightness_info {
-	struct device *dev;
-	int brightness;
-};
 
 /**
  * struct backlight_ops - backlight operations
@@ -259,9 +247,6 @@ struct backlight_properties {
 	 * passed to devm_backlight_device_register().
 	 */
 	enum backlight_type type;
-	/* Denotes if backlight supports low-persistence (read-only) */
-	bool low_persistence_capable;
-	/* Flags used to signal drivers of state changes */
 
 	/**
 	 * @state: The state of the backlight core.
@@ -280,7 +265,6 @@ struct backlight_properties {
 
 #define BL_CORE_SUSPENDED	(1 << 0)	/* backlight is suspended */
 #define BL_CORE_FBBLANK		(1 << 1)	/* backlight is under an fb blank event */
-#define BL_CORE_LPMODE		(1 << 2)	/* backlight is in low-persistence mode */
 
 	/**
 	 * @scale: The type of the brightness scale.
@@ -332,10 +316,6 @@ struct backlight_device {
 	 */
 	struct notifier_block fb_notif;
 
-	/* Notifier for backlight status update */
-	struct blocking_notifier_head notifier;
-
-	/* list entry of all registered backlight devices */
 	/**
 	 * @entry: List entry of all registered backlight devices
 	 */
@@ -375,9 +355,6 @@ static inline int backlight_update_status(struct backlight_device *bd)
 
 	return ret;
 }
-extern struct backlight_device *get_backlight_device_by_name(const char *name);
-extern struct backlight_device *get_backlight_device_by_node(
-		struct device_node *np);
 
 /**
  * backlight_enable - Enable backlight
@@ -469,14 +446,6 @@ struct backlight_device *backlight_device_get_by_name(const char *name);
 struct backlight_device *backlight_device_get_by_type(enum backlight_type type);
 int backlight_device_set_brightness(struct backlight_device *bd,
 				    unsigned long brightness);
-
-extern int backlight_device_register_notifier(struct backlight_device *bd,
-		struct notifier_block *nb);
-extern int backlight_device_unregister_notifier(struct backlight_device *bd,
-		struct notifier_block *nb);
-
-extern int backlight_device_notifier_call_chain(struct backlight_device *bd,
-		unsigned long event, void *data);
 
 #define to_backlight_device(obj) container_of(obj, struct backlight_device, dev)
 

@@ -26,7 +26,6 @@ properties:
 
   reg:
     minItems: 2
-    maxItems: 3
     items:
       - description: XUSB device controller registers
       - description: XUSB device PCI Config registers
@@ -34,7 +33,6 @@ properties:
 
   reg-names:
     minItems: 2
-    maxItems: 3
     items:
       - const: base
       - const: fpci
@@ -46,7 +44,6 @@ properties:
 
   clocks:
     minItems: 4
-    maxItems: 5
     items:
       - description: Clock to enable core XUSB dev clock.
       - description: Clock to enable XUSB super speed clock.
@@ -56,7 +53,6 @@ properties:
 
   clock-names:
     minItems: 4
-    maxItems: 5
     items:
       - const: dev
       - const: ss
@@ -82,21 +78,27 @@ properties:
 
   phys:
     minItems: 1
+    maxItems: 8
     description:
       Must contain an entry for each entry in phy-names.
       See ../phy/phy-bindings.txt for details.
 
   phy-names:
     minItems: 1
+    maxItems: 8
     items:
-      - const: usb2-0
-      - const: usb2-1
-      - const: usb2-2
-      - const: usb2-3
-      - const: usb3-0
-      - const: usb3-1
-      - const: usb3-2
-      - const: usb3-3
+      enum:
+        - usb2-0
+        - usb2-1
+        - usb2-2
+        - usb2-3
+        - usb3-0
+        - usb3-1
+        - usb3-2
+        - usb3-3
+
+  dma-coherent:
+    type: boolean
 
   avddio-usb-supply:
     description: PCIe/USB3 analog logic power supply. Must supply 1.05 V.
@@ -145,6 +147,7 @@ allOf:
             enum:
               - nvidia,tegra186-xudc
               - nvidia,tegra194-xudc
+              - nvidia,tegra234-xudc
     then:
       properties:
         reg:

@@ -587,12 +587,6 @@ static void _ppgtt_set_root_entry(struct intel_vgpu_mm *mm,
 			   entry, index, false, 0, mm->vgpu);
 }
 
-static inline void ppgtt_set_guest_root_entry(struct intel_vgpu_mm *mm,
-		struct intel_gvt_gtt_entry *entry, unsigned long index)
-{
-	_ppgtt_set_root_entry(mm, entry, index, true);
-}
-
 static inline void ppgtt_set_shadow_root_entry(struct intel_vgpu_mm *mm,
 		struct intel_gvt_gtt_entry *entry, unsigned long index)
 {
@@ -636,8 +630,17 @@ static void ggtt_set_host_entry(struct intel_vgpu_mm *mm,
 		struct intel_gvt_gtt_entry *entry, unsigned long index)
 {
 	struct intel_gvt_gtt_pte_ops *pte_ops = mm->vgpu->gvt->gtt.pte_ops;
+	unsigned long offset = index;
 
 	GEM_BUG_ON(mm->type != INTEL_GVT_MM_GGTT);
+
+	if (vgpu_gmadr_is_aperture(mm->vgpu, index << I915_GTT_PAGE_SHIFT)) {
+		offset -= (vgpu_aperture_gmadr_base(mm->vgpu) >> PAGE_SHIFT);
+		mm->ggtt_mm.host_ggtt_aperture[offset] = entry->val64;
+	} else if (vgpu_gmadr_is_hidden(mm->vgpu, index << I915_GTT_PAGE_SHIFT)) {
+		offset -= (vgpu_hidden_gmadr_base(mm->vgpu) >> PAGE_SHIFT);
+		mm->ggtt_mm.host_ggtt_hidden[offset] = entry->val64;
+	}
 
 	pte_ops->set_entry(NULL, entry, index, false, 0, mm->vgpu);
 }
@@ -737,7 +740,7 @@ static int detach_oos_page(struct intel_vgpu *vgpu,
 
 static void ppgtt_free_spt(struct intel_vgpu_ppgtt_spt *spt)
 {
-	struct device *kdev = &spt->vgpu->gvt->gt->i915->drm.pdev->dev;
+	struct device *kdev = spt->vgpu->gvt->gt->i915->drm.dev;
 
 	trace_spt_free(spt->vgpu->id, spt, spt->guest_page.type);
 
@@ -822,7 +825,7 @@ static int reclaim_one_ppgtt_mm(struct intel_gvt *gvt);
 static struct intel_vgpu_ppgtt_spt *ppgtt_alloc_spt(
 		struct intel_vgpu *vgpu, enum intel_gvt_gtt_type type)
 {
-	struct device *kdev = &vgpu->gvt->gt->i915->drm.pdev->dev;
+	struct device *kdev = vgpu->gvt->gt->i915->drm.dev;
 	struct intel_vgpu_ppgtt_spt *spt = NULL;
 	dma_addr_t daddr;
 	int ret;
@@ -1052,12 +1055,12 @@ static bool vgpu_ips_enabled(struct intel_vgpu *vgpu)
 {
 	struct drm_i915_private *dev_priv = vgpu->gvt->gt->i915;
 
-	if (INTEL_GEN(dev_priv) == 9 || INTEL_GEN(dev_priv) == 10) {
+	if (GRAPHICS_VER(dev_priv) == 9) {
 		u32 ips = vgpu_vreg_t(vgpu, GEN8_GAMW_ECO_DEV_RW_IA) &
 			GAMW_ECO_ENABLE_64K_IPS_FIELD;
 
 		return ips == GAMW_ECO_ENABLE_64K_IPS_FIELD;
-	} else if (INTEL_GEN(dev_priv) >= 11) {
+	} else if (GRAPHICS_VER(dev_priv) >= 11) {
 		/* 64K paging only controlled by IPS bit in PTE now. */
 		return true;
 	} else
@@ -1150,8 +1153,8 @@ static inline void ppgtt_generate_shadow_entry(struct intel_gvt_gtt_entry *se,
  * @vgpu: target vgpu
  * @entry: target pfn's gtt entry
  *
- * Return 1 if 2MB huge gtt shadowing is possilbe, 0 if miscondition,
- * negtive if found err.
+ * Return 1 if 2MB huge gtt shadowing is possible, 0 if miscondition,
+ * negative if found err.
  */
 static int is_2MB_gtt_possible(struct intel_vgpu *vgpu,
 	struct intel_gvt_gtt_entry *entry)
@@ -1192,10 +1195,8 @@ static int split_2MB_gtt_entry(struct intel_vgpu *vgpu,
 	for_each_shadow_entry(sub_spt, &sub_se, sub_index) {
 		ret = intel_gvt_hypervisor_dma_map_guest_page(vgpu,
 				start_gfn + sub_index, PAGE_SIZE, &dma_addr);
-		if (ret) {
-			ppgtt_invalidate_spt(spt);
-			return ret;
-		}
+		if (ret)
+			goto err;
 		sub_se.val64 = se->val64;
 
 		/* Copy the PAT field from PDE. */
@@ -1214,6 +1215,17 @@ static int split_2MB_gtt_entry(struct intel_vgpu *vgpu,
 	ops->set_pfn(se, sub_spt->shadow_page.mfn);
 	ppgtt_set_shadow_entry(spt, se, index);
 	return 0;
+err:
+	/* Cancel the existing addess mappings of DMA addr. */
+	for_each_present_shadow_entry(sub_spt, &sub_se, sub_index) {
+		gvt_vdbg_mm("invalidate 4K entry\n");
+		ppgtt_invalidate_pte(sub_spt, &sub_se);
+	}
+	/* Release the new allocated spt. */
+	trace_spt_change(sub_spt->vgpu->id, "release", sub_spt,
+		sub_spt->guest_page.gfn, sub_spt->shadow_page.type);
+	ppgtt_free_spt(sub_spt);
+	return ret;
 }
 
 static int split_64KB_gtt_entry(struct intel_vgpu *vgpu,
@@ -1944,6 +1956,21 @@ static struct intel_vgpu_mm *intel_vgpu_create_ggtt_mm(struct intel_vgpu *vgpu)
 		return ERR_PTR(-ENOMEM);
 	}
 
+	mm->ggtt_mm.host_ggtt_aperture = vzalloc((vgpu_aperture_sz(vgpu) >> PAGE_SHIFT) * sizeof(u64));
+	if (!mm->ggtt_mm.host_ggtt_aperture) {
+		vfree(mm->ggtt_mm.virtual_ggtt);
+		vgpu_free_mm(mm);
+		return ERR_PTR(-ENOMEM);
+	}
+
+	mm->ggtt_mm.host_ggtt_hidden = vzalloc((vgpu_hidden_sz(vgpu) >> PAGE_SHIFT) * sizeof(u64));
+	if (!mm->ggtt_mm.host_ggtt_hidden) {
+		vfree(mm->ggtt_mm.host_ggtt_aperture);
+		vfree(mm->ggtt_mm.virtual_ggtt);
+		vgpu_free_mm(mm);
+		return ERR_PTR(-ENOMEM);
+	}
+
 	return mm;
 }
 
@@ -1971,6 +1998,8 @@ void _intel_vgpu_mm_release(struct kref *mm_ref)
 		invalidate_ppgtt_mm(mm);
 	} else {
 		vfree(mm->ggtt_mm.virtual_ggtt);
+		vfree(mm->ggtt_mm.host_ggtt_aperture);
+		vfree(mm->ggtt_mm.host_ggtt_hidden);
 	}
 
 	vgpu_free_mm(mm);
@@ -2376,7 +2405,7 @@ static int alloc_scratch_pages(struct intel_vgpu *vgpu,
 				vgpu->gvt->device_info.gtt_entry_size_shift;
 	void *scratch_pt;
 	int i;
-	struct device *dev = &vgpu->gvt->gt->i915->drm.pdev->dev;
+	struct device *dev = vgpu->gvt->gt->i915->drm.dev;
 	dma_addr_t daddr;
 
 	if (drm_WARN_ON(&i915->drm,
@@ -2434,7 +2463,7 @@ static int alloc_scratch_pages(struct intel_vgpu *vgpu,
 static int release_scratch_page_tree(struct intel_vgpu *vgpu)
 {
 	int i;
-	struct device *dev = &vgpu->gvt->gt->i915->drm.pdev->dev;
+	struct device *dev = vgpu->gvt->gt->i915->drm.dev;
 	dma_addr_t daddr;
 
 	for (i = GTT_TYPE_PPGTT_PTE_PT; i < GTT_TYPE_MAX; i++) {
@@ -2706,7 +2735,7 @@ int intel_gvt_init_gtt(struct intel_gvt *gvt)
 {
 	int ret;
 	void *page;
-	struct device *dev = &gvt->gt->i915->drm.pdev->dev;
+	struct device *dev = gvt->gt->i915->drm.dev;
 	dma_addr_t daddr;
 
 	gvt_dbg_core("init gtt\n");
@@ -2755,7 +2784,7 @@ int intel_gvt_init_gtt(struct intel_gvt *gvt)
  */
 void intel_gvt_clean_gtt(struct intel_gvt *gvt)
 {
-	struct device *dev = &gvt->gt->i915->drm.pdev->dev;
+	struct device *dev = gvt->gt->i915->drm.dev;
 	dma_addr_t daddr = (dma_addr_t)(gvt->gtt.scratch_mfn <<
 					I915_GTT_PAGE_SHIFT);
 
@@ -2836,19 +2865,39 @@ void intel_vgpu_reset_ggtt(struct intel_vgpu *vgpu, bool invalidate_old)
 }
 
 /**
- * intel_vgpu_reset_gtt - reset the all GTT related status
- * @vgpu: a vGPU
+ * intel_gvt_restore_ggtt - restore all vGPU's ggtt entries
+ * @gvt: intel gvt device
  *
- * This function is called from vfio core to reset reset all
- * GTT related status, including GGTT, PPGTT, scratch page.
+ * This function is called at driver resume stage to restore
+ * GGTT entries of every vGPU.
  *
  */
-void intel_vgpu_reset_gtt(struct intel_vgpu *vgpu)
+void intel_gvt_restore_ggtt(struct intel_gvt *gvt)
 {
-	/* Shadow pages are only created when there is no page
-	 * table tracking data, so remove page tracking data after
-	 * removing the shadow pages.
-	 */
-	intel_vgpu_destroy_all_ppgtt_mm(vgpu);
-	intel_vgpu_reset_ggtt(vgpu, true);
+	struct intel_vgpu *vgpu;
+	struct intel_vgpu_mm *mm;
+	int id;
+	gen8_pte_t pte;
+	u32 idx, num_low, num_hi, offset;
+
+	/* Restore dirty host ggtt for all vGPUs */
+	idr_for_each_entry(&(gvt)->vgpu_idr, vgpu, id) {
+		mm = vgpu->gtt.ggtt_mm;
+
+		num_low = vgpu_aperture_sz(vgpu) >> PAGE_SHIFT;
+		offset = vgpu_aperture_gmadr_base(vgpu) >> PAGE_SHIFT;
+		for (idx = 0; idx < num_low; idx++) {
+			pte = mm->ggtt_mm.host_ggtt_aperture[idx];
+			if (pte & _PAGE_PRESENT)
+				write_pte64(vgpu->gvt->gt->ggtt, offset + idx, pte);
+		}
+
+		num_hi = vgpu_hidden_sz(vgpu) >> PAGE_SHIFT;
+		offset = vgpu_hidden_gmadr_base(vgpu) >> PAGE_SHIFT;
+		for (idx = 0; idx < num_hi; idx++) {
+			pte = mm->ggtt_mm.host_ggtt_hidden[idx];
+			if (pte & _PAGE_PRESENT)
+				write_pte64(vgpu->gvt->gt->ggtt, offset + idx, pte);
+		}
+	}
 }

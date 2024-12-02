@@ -236,9 +236,6 @@ static int sdio_read_cccr(struct mmc_card *card, u32 ocr)
 				card->cccr.high_speed = 0;
 				card->sw_caps.hs_max_dtr = 25000000;
 			}
-		} else {
-			card->sw_caps.sd3_bus_mode |= (SD_MODE_UHS_SDR25 |
-				SD_MODE_UHS_SDR12);
 		}
 	}
 
@@ -756,7 +753,7 @@ try_again:
 	 * Read CSD, before selecting the card
 	 */
 	if (!oldcard && card->type == MMC_TYPE_SD_COMBO) {
-		err = mmc_sd_get_csd(host, card);
+		err = mmc_sd_get_csd(card);
 		if (err)
 			goto remove;
 
@@ -942,11 +939,9 @@ static void mmc_sdio_detect(struct mmc_host *host)
 
 	/* Make sure card is powered before detecting it */
 	if (host->caps & MMC_CAP_POWER_OFF_CARD) {
-		err = pm_runtime_get_sync(&host->card->dev);
-		if (err < 0) {
-			pm_runtime_put_noidle(&host->card->dev);
+		err = pm_runtime_resume_and_get(&host->card->dev);
+		if (err < 0)
 			goto out;
-		}
 	}
 
 	mmc_claim_host(host);
@@ -1078,8 +1073,14 @@ static int mmc_sdio_resume(struct mmc_host *host)
 		}
 		err = mmc_sdio_reinit_card(host);
 	} else if (mmc_card_wake_sdio_irq(host)) {
-		/* We may have switched to 1-bit mode during suspend */
+		/*
+		 * We may have switched to 1-bit mode during suspend,
+		 * need to hold retuning, because tuning only supprt
+		 * 4-bit mode or 8 bit mode.
+		 */
+		mmc_retune_hold_now(host);
 		err = sdio_enable_4bit_bus(host->card);
+		mmc_retune_release(host);
 	}
 
 	if (err)
@@ -1202,18 +1203,8 @@ int mmc_attach_sdio(struct mmc_host *host)
 	if (host->ocr_avail_sdio)
 		host->ocr_avail = host->ocr_avail_sdio;
 
-	/*
-	 * SDIO devices can support 1.8V but SDIO spec doesn't define any bits
-	 * in OCR register for 1.8V voltage window. Bit 24 indicates 1.8V
-	 * voltage switching support only. As this is checked at a later point,
-	 * skip selecting voltages if the host indicates support only for 1.8V.
-	 * Also, if the host only supports low voltage(1.8V), mask 2.7-3.6V VDD
-	 * range from the card returned OCR.
-	 */
-	if (host->ocr_avail == MMC_VDD_165_195)
-		rocr = ((ocr | MMC_VDD_165_195) & ~MMC_VDD_27_36);
-	else
-		rocr = mmc_select_voltage(host, ocr);
+
+	rocr = mmc_select_voltage(host, ocr);
 
 	/*
 	 * Can we support the voltage(s) of the card(s)?

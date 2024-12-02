@@ -1611,12 +1611,9 @@ enum tegra_mux {
 	TEGRA_MUX_VIMCLK2_ALT,
 };
 
-#define FUNCTION(fname)					\
-	{						\
-		.name = #fname,				\
-	}
+#define FUNCTION(fname) #fname
 
-static struct tegra_function tegra124_functions[] = {
+static const char * const tegra124_functions[] = {
 	FUNCTION(blink),
 	FUNCTION(ccla),
 	FUNCTION(cec),
@@ -1741,7 +1738,6 @@ static struct tegra_function tegra124_functions[] = {
 		.lock_bit = 7,						\
 		.ioreset_bit = PINGROUP_BIT_##ior(8),			\
 		.rcv_sel_bit = PINGROUP_BIT_##rcv_sel(9),		\
-		.pad_bit = -1,						\
 		.drv_reg = -1,						\
 		.parked_bitmask = 0,					\
 	}
@@ -1763,7 +1759,6 @@ static struct tegra_function tegra124_functions[] = {
 		.rcv_sel_bit = -1,					\
 		.drv_reg = DRV_PINGROUP_REG(r),				\
 		.drv_bank = 0,						\
-		.pad_bit = -1,						\
 		.hsm_bit = hsm_b,					\
 		.schmitt_bit = schmitt_b,				\
 		.lpmd_bit = lpmd_b,					\

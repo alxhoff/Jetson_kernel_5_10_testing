@@ -6,6 +6,7 @@
  *	Andrew F. Davis <afd@ti.com>
  */
 
+#include <linux/debugfs.h>
 #include <linux/hwmon.h>
 #include <linux/hwmon-sysfs.h>
 #include <linux/i2c.h>
@@ -95,42 +96,17 @@ enum ina3221_channels {
 };
 
 /**
- * struct shuntv_offset_range - [WAR] shunt voltage offset sub-range
- * @start: range start (uV)
- * @end: range end (uV)
- * @offset: offset for the current sub-range
- */
-struct shuntv_offset_range {
-	s32 start;
-	s32 end;
-	s32 offset;
-};
-
-/**
- * struct shuntv_offset - [WAR] shunt voltage offset information
- * @offset: general offset
- * @range: pointer to a sub-range of shunt voltage offset (uV)
- * @num_range: number of sub-ranges of shunt voltage offset
- */
-struct shuntv_offset {
-	s32 offset;
-	struct shuntv_offset_range *range;
-	s32 num_range;
-};
-
-/**
  * struct ina3221_input - channel input source specific information
- * @shuntv_offset: [WAR] shunt voltage offset information
  * @label: label of channel input source
  * @shunt_resistor: shunt resistor value of channel input source
  * @disconnected: connection status of channel input source
+ * @summation_disable: channel summation status of input source
  */
 struct ina3221_input {
-	struct shuntv_offset *shuntv_offset;
 	const char *label;
 	int shunt_resistor;
 	bool disconnected;
-	bool summation_bypass;
+	bool summation_disable;
 };
 
 /**
@@ -140,8 +116,10 @@ struct ina3221_input {
  * @fields: Register fields of the device
  * @inputs: Array of channel input source specific structures
  * @lock: mutex lock to serialize sysfs attribute accesses
+ * @debugfs: Pointer to debugfs entry for device
  * @reg_config: Register value of INA3221_CONFIG
  * @summation_shunt_resistor: equivalent shunt resistor value for summation
+ * @summation_channel_control: Value written to SCC field in INA3221_MASK_ENABLE
  * @single_shot: running in single-shot operating mode
  */
 struct ina3221_data {
@@ -150,6 +128,7 @@ struct ina3221_data {
 	struct regmap_field *fields[F_MAX_FIELDS];
 	struct ina3221_input inputs[INA3221_NUM_CHANNELS];
 	struct mutex lock;
+	struct dentry *debugfs;
 	u32 reg_config;
 	int summation_shunt_resistor;
 	u32 summation_channel_control;
@@ -167,7 +146,7 @@ static inline bool ina3221_is_enabled(struct ina3221_data *ina, int channel)
 	       (ina->reg_config & INA3221_CONFIG_CHx_EN(channel));
 }
 
-/**
+/*
  * Helper function to return the resistor value for current summation.
  *
  * There is a condition to calculate current summation -- all the shunt
@@ -183,7 +162,7 @@ static inline int ina3221_summation_shunt_resistor(struct ina3221_data *ina)
 
 	for (i = 0; i < INA3221_NUM_CHANNELS; i++) {
 		if (input[i].disconnected || !input[i].shunt_resistor ||
-		    input[i].summation_bypass)
+		    input[i].summation_disable)
 			continue;
 		if (!shunt_resistor) {
 			/* Found the reference shunt resistor value */
@@ -318,6 +297,7 @@ static int ina3221_read_in(struct device *dev, u32 attr, int channel, long *val)
 		if (ina->single_shot) {
 			regmap_write(ina->regmap, INA3221_CONFIG,
 				     ina->reg_config);
+
 			ret = ina3221_wait_for_data(ina);
 			if (ret)
 				return ret;
@@ -357,7 +337,7 @@ static int ina3221_read_curr(struct device *dev, u32 attr,
 	struct ina3221_data *ina = dev_get_drvdata(dev);
 	struct ina3221_input *input = ina->inputs;
 	u8 reg = ina3221_curr_reg[attr][channel];
-	int resistance_uo, voltage_uv;
+	int resistance_uo, voltage_nv;
 	int regval, ret;
 
 	if (channel > INA3221_CHANNEL3)
@@ -374,6 +354,7 @@ static int ina3221_read_curr(struct device *dev, u32 attr,
 		if (ina->single_shot) {
 			regmap_write(ina->regmap, INA3221_CONFIG,
 				     ina->reg_config);
+
 			ret = ina3221_wait_for_data(ina);
 			if (ret)
 				return ret;
@@ -389,34 +370,10 @@ static int ina3221_read_curr(struct device *dev, u32 attr,
 		if (ret)
 			return ret;
 
-		/* Scale of shunt voltage: LSB is 40uV */
-		voltage_uv = regval * 40;
-
-		/* Apply software WAR to offset shunt voltage for accuracy */
-		if (input->shuntv_offset) {
-			struct shuntv_offset_range *range =
-						input->shuntv_offset->range;
-			int num_range = input->shuntv_offset->num_range;
-			int offset = input->shuntv_offset->offset;
-
-			while (num_range--) {
-				if (voltage_uv >= range->start &&
-				    voltage_uv <= range->end) {
-					/* Use range offset instead */
-					offset = range->offset;
-					break;
-				}
-				range++;
-			}
-
-			if (voltage_uv < 0)
-				voltage_uv += offset;
-			else
-				voltage_uv -= offset;
-		}
-
+		/* Scale of shunt voltage: LSB is 40uV (40000nV) */
+		voltage_nv = regval * 40000;
 		/* Return current in mA */
-		*val = DIV_ROUND_CLOSEST(voltage_uv * 1000, resistance_uo);
+		*val = DIV_ROUND_CLOSEST(voltage_nv, resistance_uo);
 		return 0;
 	case hwmon_curr_crit_alarm:
 	case hwmon_curr_max_alarm:
@@ -656,7 +613,7 @@ static umode_t ina3221_is_visible(const void *drvdata,
 		switch (attr) {
 		case hwmon_chip_samples:
 		case hwmon_chip_update_interval:
-			return 0600;
+			return 0644;
 		default:
 			return 0;
 		}
@@ -670,13 +627,13 @@ static umode_t ina3221_is_visible(const void *drvdata,
 			if (channel - 1 <= INA3221_CHANNEL3)
 				input = &ina->inputs[channel - 1];
 			else if (channel == 7)
-				return 0400;
+				return 0444;
 			/* Hide label node if label is not provided */
-			return (input && input->label) ? 0400 : 0;
+			return (input && input->label) ? 0444 : 0;
 		case hwmon_in_input:
-			return 0400;
+			return 0444;
 		case hwmon_in_enable:
-			return 0600;
+			return 0644;
 		default:
 			return 0;
 		}
@@ -685,10 +642,10 @@ static umode_t ina3221_is_visible(const void *drvdata,
 		case hwmon_curr_input:
 		case hwmon_curr_crit_alarm:
 		case hwmon_curr_max_alarm:
-			return 0400;
+			return 0444;
 		case hwmon_curr_crit:
 		case hwmon_curr_max:
-			return 0600;
+			return 0644;
 		default:
 			return 0;
 		}
@@ -749,7 +706,7 @@ static ssize_t ina3221_shunt_show(struct device *dev,
 	unsigned int channel = sd_attr->index;
 	struct ina3221_input *input = &ina->inputs[channel];
 
-	return snprintf(buf, PAGE_SIZE, "%d\n", input->shunt_resistor);
+	return sysfs_emit(buf, "%d\n", input->shunt_resistor);
 }
 
 static ssize_t ina3221_shunt_store(struct device *dev,
@@ -809,84 +766,6 @@ static const struct regmap_config ina3221_regmap_config = {
 	.volatile_table = &ina3221_volatile_table,
 };
 
-static struct shuntv_offset *
-ina3221_probe_shuntv_offset_from_dt(struct device *dev,
-				    struct device_node *child)
-{
-	struct device_node *np, *range_np;
-	struct shuntv_offset *shuntv_offset;
-	struct shuntv_offset_range *range;
-	s32 start, end, offset;
-	const __be32 *prop;
-	int ret, num_range;
-
-	prop = of_get_property(child, "shunt-volt-offset-uv", NULL);
-	/* Silently return for devices with no need of an offset WAR */
-	if (!prop)
-		return NULL;
-
-	np = of_find_node_by_phandle(be32_to_cpup(prop));
-	if (!np) {
-		dev_err(dev, "corrupted phandle for shunt-volt-offset-uv\n");
-		return ERR_PTR(-ENODEV);
-	}
-
-	ret = of_property_read_s32(np, "offset", &offset);
-	if (ret) {
-		dev_err(dev, "failed to read general shuntv offset\n");
-		return ERR_PTR(-ENODEV);
-	}
-
-	shuntv_offset = devm_kzalloc(dev, sizeof(*shuntv_offset), GFP_KERNEL);
-	if (!shuntv_offset)
-		return ERR_PTR(-ENOMEM);
-
-	shuntv_offset->offset = offset;
-
-	num_range = of_get_child_count(np);
-
-	/* Return upon no sub-range found */
-	if (!num_range)
-		return shuntv_offset;
-
-	range = devm_kzalloc(dev, sizeof(*range) * num_range, GFP_KERNEL);
-	if (!range)
-		return ERR_PTR(-ENOMEM);
-
-	shuntv_offset->range = range;
-	shuntv_offset->num_range = num_range;
-
-	for_each_child_of_node(np, range_np) {
-		ret = of_property_read_s32(range_np, "start", &start);
-		if (ret) {
-			dev_warn(dev, "missing start in range node\n");
-			range++;
-			continue;
-		}
-
-		ret = of_property_read_s32(range_np, "end", &end);
-		if (ret) {
-			dev_warn(dev, "missing end in range node\n");
-			range++;
-			continue;
-		}
-
-		ret = of_property_read_s32(range_np, "offset", &offset);
-		if (ret) {
-			dev_warn(dev, "missing offset in range node\n");
-			range++;
-			continue;
-		}
-
-		range->start = start;
-		range->end = end;
-		range->offset = offset;
-		range++;
-	}
-
-	return shuntv_offset;
-}
-
 static int ina3221_probe_child_from_dt(struct device *dev,
 				       struct device_node *child,
 				       struct ina3221_data *ina)
@@ -901,7 +780,7 @@ static int ina3221_probe_child_from_dt(struct device *dev,
 		return ret;
 	} else if (val > INA3221_CHANNEL3) {
 		dev_err(dev, "invalid reg %d of %pOFn\n", val, child);
-		return ret;
+		return -EINVAL;
 	}
 
 	input = &ina->inputs[val];
@@ -916,7 +795,7 @@ static int ina3221_probe_child_from_dt(struct device *dev,
 	of_property_read_string(child, "label", &input->label);
 
 	/* summation channel control */
-	input->summation_bypass = of_property_read_bool(child, "summation-bypass");
+	input->summation_disable = of_property_read_bool(child, "ti,summation-disable");
 
 	/* Overwrite default shunt resistor value optionally */
 	if (!of_property_read_u32(child, "shunt-resistor-micro-ohms", &val)) {
@@ -927,11 +806,6 @@ static int ina3221_probe_child_from_dt(struct device *dev,
 		}
 		input->shunt_resistor = val;
 	}
-
-	/* Apply software WAR to offset shunt voltage for accuracy */
-	input->shuntv_offset = ina3221_probe_shuntv_offset_from_dt(dev, child);
-	if (IS_ERR(input->shuntv_offset))
-		return PTR_ERR(input->shuntv_offset);
 
 	return 0;
 }
@@ -964,6 +838,7 @@ static int ina3221_probe(struct i2c_client *client)
 	struct device *dev = &client->dev;
 	struct ina3221_data *ina;
 	struct device *hwmon_dev;
+	char name[32];
 	int i, ret;
 
 	ina = devm_kzalloc(dev, sizeof(*ina), GFP_KERNEL);
@@ -1011,8 +886,8 @@ static int ina3221_probe(struct i2c_client *client)
 	/* Initialize summation_shunt_resistor for summation channel control */
 	ina->summation_shunt_resistor = ina3221_summation_shunt_resistor(ina);
 	for (i = 0; i < INA3221_NUM_CHANNELS; i++) {
-		if (!ina->inputs[i].summation_bypass)
-			ina->summation_channel_control |= (BIT(14 - i));
+		if (!ina->inputs[i].summation_disable)
+			ina->summation_channel_control |= BIT(14 - i);
 	}
 
 	ina->pm_dev = dev;
@@ -1041,6 +916,15 @@ static int ina3221_probe(struct i2c_client *client)
 		goto fail;
 	}
 
+	scnprintf(name, sizeof(name), "%s-%s", INA3221_DRIVER_NAME, dev_name(dev));
+	ina->debugfs = debugfs_create_dir(name, NULL);
+
+	for (i = 0; i < INA3221_NUM_CHANNELS; i++) {
+		scnprintf(name, sizeof(name), "in%d_summation_disable", i);
+		debugfs_create_bool(name, 0400, ina->debugfs,
+				    &ina->inputs[i].summation_disable);
+	}
+
 	return 0;
 
 fail:
@@ -1058,6 +942,8 @@ static int ina3221_remove(struct i2c_client *client)
 {
 	struct ina3221_data *ina = dev_get_drvdata(&client->dev);
 	int i;
+
+	debugfs_remove_recursive(ina->debugfs);
 
 	pm_runtime_disable(ina->pm_dev);
 	pm_runtime_set_suspended(ina->pm_dev);
@@ -1121,7 +1007,7 @@ static int __maybe_unused ina3221_resume(struct device *dev)
 	/* Initialize summation channel control */
 	if (ina->summation_shunt_resistor) {
 		/*
-		 * Take all three channels into summation by default
+		 * Sum only channels that are not disabled for summation.
 		 * Shunt measurements of disconnected channels should
 		 * be 0, so it does not matter for summation.
 		 */

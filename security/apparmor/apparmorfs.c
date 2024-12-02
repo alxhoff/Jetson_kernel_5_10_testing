@@ -401,7 +401,7 @@ static struct aa_loaddata *aa_simple_write_to_buffer(const char __user *userbuf,
 
 	data->size = copy_size;
 	if (copy_from_user(data->data, userbuf, copy_size)) {
-		kvfree(data);
+		aa_put_loaddata(data);
 		return ERR_PTR(-EFAULT);
 	}
 
@@ -867,8 +867,10 @@ static struct multi_transaction *multi_transaction_new(struct file *file,
 	if (!t)
 		return ERR_PTR(-ENOMEM);
 	kref_init(&t->count);
-	if (copy_from_user(t->data, buf, size))
+	if (copy_from_user(t->data, buf, size)) {
+		put_multi_transaction(t);
 		return ERR_PTR(-EFAULT);
+	}
 
 	return t;
 }
@@ -1773,7 +1775,8 @@ fail2:
 	return error;
 }
 
-static int ns_mkdir_op(struct inode *dir, struct dentry *dentry, umode_t mode)
+static int ns_mkdir_op(struct user_namespace *mnt_userns, struct inode *dir,
+		       struct dentry *dentry, umode_t mode)
 {
 	struct aa_ns *ns, *parent;
 	/* TODO: improve permission check */
@@ -2046,9 +2049,6 @@ fail2:
 	return error;
 }
 
-
-#define list_entry_is_head(pos, head, member) (&pos->member == (head))
-
 /**
  * __next_ns - find the next namespace to list
  * @root: root namespace to stop search at (NOT NULL)
@@ -2293,6 +2293,12 @@ static struct aa_sfs_entry aa_sfs_entry_file[] = {
 	{ }
 };
 
+static struct aa_sfs_entry aa_sfs_entry_ipc[] = {
+	AA_SFS_FILE_STRING("posix_mqueue",
+			   "create read write open delete setattr getattr"),
+	{ }
+};
+
 static struct aa_sfs_entry aa_sfs_entry_ptrace[] = {
 	AA_SFS_FILE_STRING("mask", "read trace"),
 	{ }
@@ -2348,6 +2354,11 @@ static struct aa_sfs_entry aa_sfs_entry_ns[] = {
 	{ }
 };
 
+static struct aa_sfs_entry aa_sfs_entry_dbus[] = {
+	AA_SFS_FILE_STRING("mask", "acquire send receive"),
+	{ }
+};
+
 static struct aa_sfs_entry aa_sfs_entry_query_label[] = {
 	AA_SFS_FILE_STRING("perms", "allow deny audit quiet"),
 	AA_SFS_FILE_BOOLEAN("data",		1),
@@ -2363,7 +2374,9 @@ static struct aa_sfs_entry aa_sfs_entry_features[] = {
 	AA_SFS_DIR("policy",			aa_sfs_entry_policy),
 	AA_SFS_DIR("domain",			aa_sfs_entry_domain),
 	AA_SFS_DIR("file",			aa_sfs_entry_file),
+	AA_SFS_DIR("ipc",			aa_sfs_entry_ipc),
 	AA_SFS_DIR("network_v8",		aa_sfs_entry_network),
+	AA_SFS_DIR("network",			aa_sfs_entry_network_compat),
 	AA_SFS_DIR("mount",			aa_sfs_entry_mount),
 	AA_SFS_DIR("namespaces",		aa_sfs_entry_ns),
 	AA_SFS_FILE_U64("capability",		VFS_CAP_FLAGS_MASK),
@@ -2371,6 +2384,7 @@ static struct aa_sfs_entry aa_sfs_entry_features[] = {
 	AA_SFS_DIR("caps",			aa_sfs_entry_caps),
 	AA_SFS_DIR("ptrace",			aa_sfs_entry_ptrace),
 	AA_SFS_DIR("signal",			aa_sfs_entry_signal),
+	AA_SFS_DIR("dbus",			aa_sfs_entry_dbus),
 	AA_SFS_DIR("query",			aa_sfs_entry_query),
 	{ }
 };

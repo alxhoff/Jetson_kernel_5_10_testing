@@ -42,8 +42,6 @@ int extcon_set_state(struct extcon_dev *edev, unsigned int id,
 				bool state);
 int extcon_set_state_sync(struct extcon_dev *edev, unsigned int id,
 				bool state);
-extern struct extcon_dev *extcon_get_extcon_dev_by_cable(struct device *dev,
-			const char *cable_name);
 
 /*
  * Following APIs set the property of each external connector.
@@ -106,12 +104,6 @@ static inline int extcon_set_state_sync(struct extcon_dev *edev, unsigned int id
 				bool state)
 {
 	return 0;
-}
-
-static inline struct extcon_dev *extcon_get_extcon_dev_by_cable(
-		struct device *dev, const char *cable_name)
-{
-	return NULL;
 }
 
 static inline int extcon_sync(struct extcon_dev *edev, unsigned int id)

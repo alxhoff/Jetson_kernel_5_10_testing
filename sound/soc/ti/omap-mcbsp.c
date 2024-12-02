@@ -74,14 +74,16 @@ static int omap2_mcbsp_set_clks_src(struct omap_mcbsp *mcbsp, u8 fck_src_id)
 		return -EINVAL;
 	}
 
-	pm_runtime_put_sync(mcbsp->dev);
+	if (mcbsp->active)
+		pm_runtime_put_sync(mcbsp->dev);
 
 	r = clk_set_parent(mcbsp->fclk, fck_src);
 	if (r)
 		dev_err(mcbsp->dev, "CLKS: could not clk_set_parent() to %s\n",
 			src);
 
-	pm_runtime_get_sync(mcbsp->dev);
+	if (mcbsp->active)
+		pm_runtime_get_sync(mcbsp->dev);
 
 	clk_put(fck_src);
 
@@ -373,10 +375,9 @@ static void omap_mcbsp_free(struct omap_mcbsp *mcbsp)
 		MCBSP_WRITE(mcbsp, WAKEUPEN, 0);
 
 	/* Disable interrupt requests */
-	if (mcbsp->irq)
+	if (mcbsp->irq) {
 		MCBSP_WRITE(mcbsp, IRQEN, 0);
 
-	if (mcbsp->irq) {
 		free_irq(mcbsp->irq, (void *)mcbsp);
 	} else {
 		free_irq(mcbsp->rx_irq, (void *)mcbsp);
@@ -540,7 +541,7 @@ static ssize_t prop##_store(struct device *dev,				\
 	return size;							\
 }									\
 									\
-static DEVICE_ATTR(prop, 0644, prop##_show, prop##_store)
+static DEVICE_ATTR_RW(prop)
 
 THRESHOLD_PROP_BUILDER(max_tx_thres);
 THRESHOLD_PROP_BUILDER(max_rx_thres);

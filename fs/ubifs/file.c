@@ -92,7 +92,7 @@ static int read_block(struct inode *inode, void *addr, unsigned int block,
 dump:
 	ubifs_err(c, "bad data node (block %u, inode %lu)",
 		  block, inode->i_ino);
-	ubifs_dump_node(c, dn);
+	ubifs_dump_node(c, dn, UBIFS_MAX_DATA_NODE_SZ);
 	return -EINVAL;
 }
 
@@ -205,7 +205,7 @@ static void release_new_page_budget(struct ubifs_info *c)
  * @c: UBIFS file-system description object
  *
  * This is a helper function which releases budget corresponding to the budget
- * of changing one one page of data which already exists on the flash media.
+ * of changing one page of data which already exists on the flash media.
  */
 static void release_existing_page_budget(struct ubifs_info *c)
 {
@@ -1031,7 +1031,7 @@ static int ubifs_writepage(struct page *page, struct writeback_control *wbc)
 		if (page->index >= synced_i_size >> PAGE_SHIFT) {
 			err = inode->i_sb->s_op->write_inode(inode, NULL);
 			if (err)
-				goto out_unlock;
+				goto out_redirty;
 			/*
 			 * The inode has been written, but the write-buffer has
 			 * not been synchronized, so in case of an unclean
@@ -1059,11 +1059,17 @@ static int ubifs_writepage(struct page *page, struct writeback_control *wbc)
 	if (i_size > synced_i_size) {
 		err = inode->i_sb->s_op->write_inode(inode, NULL);
 		if (err)
-			goto out_unlock;
+			goto out_redirty;
 	}
 
 	return do_writepage(page, len);
-
+out_redirty:
+	/*
+	 * redirty_page_for_writepage() won't call ubifs_dirty_inode() because
+	 * it passes I_DIRTY_PAGES flag while calling __mark_inode_dirty(), so
+	 * there is no need to do space budget for dirty inode.
+	 */
+	redirty_page_for_writepage(wbc, page);
 out_unlock:
 	unlock_page(page);
 	return err;
@@ -1257,7 +1263,8 @@ static int do_setattr(struct ubifs_info *c, struct inode *inode,
 	return err;
 }
 
-int ubifs_setattr(struct dentry *dentry, struct iattr *attr)
+int ubifs_setattr(struct user_namespace *mnt_userns, struct dentry *dentry,
+		  struct iattr *attr)
 {
 	int err;
 	struct inode *inode = d_inode(dentry);
@@ -1265,7 +1272,7 @@ int ubifs_setattr(struct dentry *dentry, struct iattr *attr)
 
 	dbg_gen("ino %lu, mode %#x, ia_valid %#x",
 		inode->i_ino, inode->i_mode, attr->ia_valid);
-	err = setattr_prepare(dentry, attr);
+	err = setattr_prepare(&init_user_ns, dentry, attr);
 	if (err)
 		return err;
 
@@ -1629,10 +1636,11 @@ static const char *ubifs_get_link(struct dentry *dentry,
 	return fscrypt_get_symlink(inode, ui->data, ui->data_len, done);
 }
 
-static int ubifs_symlink_getattr(const struct path *path, struct kstat *stat,
+static int ubifs_symlink_getattr(struct user_namespace *mnt_userns,
+				 const struct path *path, struct kstat *stat,
 				 u32 request_mask, unsigned int query_flags)
 {
-	ubifs_getattr(path, stat, request_mask, query_flags);
+	ubifs_getattr(mnt_userns, path, stat, request_mask, query_flags);
 
 	if (IS_ENCRYPTED(d_inode(path->dentry)))
 		return fscrypt_symlink_getattr(path, stat);
@@ -1655,19 +1663,17 @@ const struct address_space_operations ubifs_file_address_operations = {
 const struct inode_operations ubifs_file_inode_operations = {
 	.setattr     = ubifs_setattr,
 	.getattr     = ubifs_getattr,
-#ifdef CONFIG_UBIFS_FS_XATTR
 	.listxattr   = ubifs_listxattr,
-#endif
 	.update_time = ubifs_update_time,
+	.fileattr_get = ubifs_fileattr_get,
+	.fileattr_set = ubifs_fileattr_set,
 };
 
 const struct inode_operations ubifs_symlink_inode_operations = {
 	.get_link    = ubifs_get_link,
 	.setattr     = ubifs_setattr,
 	.getattr     = ubifs_symlink_getattr,
-#ifdef CONFIG_UBIFS_FS_XATTR
 	.listxattr   = ubifs_listxattr,
-#endif
 	.update_time = ubifs_update_time,
 };
 

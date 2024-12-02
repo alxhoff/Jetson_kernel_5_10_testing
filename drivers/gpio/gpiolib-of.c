@@ -3,7 +3,6 @@
  * OF helpers for the GPIO API
  *
  * Copyright (c) 2007-2008  MontaVista Software, Inc.
- * Copyright (c) 2017-2019, NVIDIA Corporation. All rights reserved.
  *
  * Author: Anton Vorontsov <avorontsov@ru.mvista.com>
  */
@@ -123,7 +122,7 @@ static struct gpio_desc *of_xlate_and_get_gpiod_flags(struct gpio_chip *chip,
 bool of_gpio_need_valid_mask(const struct gpio_chip *gc)
 {
 	int size;
-	struct device_node *np = gc->of_node;
+	const struct device_node *np = gc->of_node;
 
 	size = of_property_count_u32_elems(np,  "gpio-reserved-ranges");
 	if (size > 0 && size % 2 == 0)
@@ -131,7 +130,7 @@ bool of_gpio_need_valid_mask(const struct gpio_chip *gc)
 	return false;
 }
 
-static void of_gpio_flags_quirks(struct device_node *np,
+static void of_gpio_flags_quirks(const struct device_node *np,
 				 const char *propname,
 				 enum of_gpio_flags *flags,
 				 int index)
@@ -237,7 +236,7 @@ static void of_gpio_flags_quirks(struct device_node *np,
  * value on the error condition. If @flags is not NULL the function also fills
  * in flags for the GPIO.
  */
-static struct gpio_desc *of_get_named_gpiod_flags(struct device_node *np,
+static struct gpio_desc *of_get_named_gpiod_flags(const struct device_node *np,
 		     const char *propname, int index, enum of_gpio_flags *flags)
 {
 	struct of_phandle_args gpiospec;
@@ -276,7 +275,7 @@ out:
 	return desc;
 }
 
-int of_get_named_gpio_flags(struct device_node *np, const char *list_name,
+int of_get_named_gpio_flags(const struct device_node *np, const char *list_name,
 			    int index, enum of_gpio_flags *flags)
 {
 	struct gpio_desc *desc;
@@ -304,7 +303,7 @@ EXPORT_SYMBOL_GPL(of_get_named_gpio_flags);
  *
  * In case of error an ERR_PTR() is returned.
  */
-struct gpio_desc *gpiod_get_from_of_node(struct device_node *node,
+struct gpio_desc *gpiod_get_from_of_node(const struct device_node *node,
 					 const char *propname, int index,
 					 enum gpiod_flags dflags,
 					 const char *label)
@@ -374,7 +373,7 @@ static struct gpio_desc *of_find_spi_gpio(struct device *dev, const char *con_id
 					  enum of_gpio_flags *of_flags)
 {
 	char prop_name[32]; /* 32 is max size of property name */
-	struct device_node *np = dev->of_node;
+	const struct device_node *np = dev->of_node;
 	struct gpio_desc *desc;
 
 	/*
@@ -405,7 +404,7 @@ static struct gpio_desc *of_find_spi_cs_gpio(struct device *dev,
 					     unsigned int idx,
 					     unsigned long *flags)
 {
-	struct device_node *np = dev->of_node;
+	const struct device_node *np = dev->of_node;
 
 	if (!IS_ENABLED(CONFIG_SPI_MASTER))
 		return ERR_PTR(-ENOENT);
@@ -441,7 +440,7 @@ static struct gpio_desc *of_find_regulator_gpio(struct device *dev, const char *
 		"wlf,ldo1ena", /* WM8994 */
 		"wlf,ldo2ena", /* WM8994 */
 	};
-	struct device_node *np = dev->of_node;
+	const struct device_node *np = dev->of_node;
 	struct gpio_desc *desc;
 	int i;
 
@@ -470,21 +469,6 @@ static struct gpio_desc *of_find_arizona_gpio(struct device *dev,
 		return ERR_PTR(-ENOENT);
 
 	return of_get_named_gpiod_flags(dev->of_node, con_id, 0, of_flags);
-}
-
-static int of_gpio_get_gpio_cells_size(struct device_node *chip_np)
-{
-	u32 ncells;
-	int ret;
-
-	ret = of_property_read_u32(chip_np, "#gpio-cells", &ncells);
-	if (ret)
-		return ret;
-
-	if (ncells > MAX_PHANDLE_ARGS)
-		return -EINVAL;
-
-	return ncells;
 }
 
 static struct gpio_desc *of_find_usb_gpio(struct device *dev,
@@ -525,31 +509,31 @@ struct gpio_desc *of_find_gpio(struct device *dev, const char *con_id,
 		desc = of_get_named_gpiod_flags(dev->of_node, prop_name, idx,
 						&of_flags);
 
-		if (!IS_ERR(desc) || PTR_ERR(desc) != -ENOENT)
+		if (!gpiod_not_found(desc))
 			break;
 	}
 
-	if (PTR_ERR(desc) == -ENOENT) {
+	if (gpiod_not_found(desc)) {
 		/* Special handling for SPI GPIOs if used */
 		desc = of_find_spi_gpio(dev, con_id, &of_flags);
 	}
 
-	if (PTR_ERR(desc) == -ENOENT) {
+	if (gpiod_not_found(desc)) {
 		/* This quirk looks up flags and all */
 		desc = of_find_spi_cs_gpio(dev, con_id, idx, flags);
 		if (!IS_ERR(desc))
 			return desc;
 	}
 
-	if (PTR_ERR(desc) == -ENOENT) {
+	if (gpiod_not_found(desc)) {
 		/* Special handling for regulator GPIOs if used */
 		desc = of_find_regulator_gpio(dev, con_id, &of_flags);
 	}
 
-	if (PTR_ERR(desc) == -ENOENT)
+	if (gpiod_not_found(desc))
 		desc = of_find_arizona_gpio(dev, con_id, &of_flags);
 
-	if (PTR_ERR(desc) == -ENOENT)
+	if (gpiod_not_found(desc))
 		desc = of_find_usb_gpio(dev, con_id, &of_flags);
 
 	if (IS_ERR(desc))
@@ -600,9 +584,8 @@ static struct gpio_desc *of_parse_own_gpio(struct device_node *np,
 	struct of_phandle_args gpiospec;
 	struct gpio_desc *desc;
 	unsigned int i;
+	u32 tmp;
 	int ret;
-	int ncells;
-	int start_index;
 
 	chip_np = chip->of_node;
 	if (!chip_np)
@@ -610,18 +593,17 @@ static struct gpio_desc *of_parse_own_gpio(struct device_node *np,
 
 	xlate_flags = 0;
 	*lflags = GPIO_LOOKUP_FLAGS_DEFAULT;
-	*dflags = 0;
+	*dflags = GPIOD_ASIS;
 
-	ncells = of_gpio_get_gpio_cells_size(chip_np);
-	if (ncells < 0)
-		return ERR_PTR(ncells);
+	ret = of_property_read_u32(chip_np, "#gpio-cells", &tmp);
+	if (ret)
+		return ERR_PTR(ret);
 
-	start_index = ncells * idx;
 	gpiospec.np = chip_np;
-	gpiospec.args_count = ncells;
+	gpiospec.args_count = tmp;
 
-	for (i = 0; i < ncells; i++) {
-		ret = of_property_read_u32_index(np, "gpios", start_index + i,
+	for (i = 0; i < tmp; i++) {
+		ret = of_property_read_u32_index(np, "gpios", idx * tmp + i,
 						 &gpiospec.args[i]);
 		if (ret)
 			return ERR_PTR(ret);
@@ -646,16 +628,13 @@ static struct gpio_desc *of_parse_own_gpio(struct device_node *np,
 		*dflags |= GPIOD_OUT_LOW;
 	else if (of_property_read_bool(np, "output-high"))
 		*dflags |= GPIOD_OUT_HIGH;
-	else if (of_property_read_bool(np, "function"))
-		*dflags = 0;
 	else {
 		pr_warn("GPIO line %d (%pOFn): no hogging state specified, bailing out\n",
 			desc_to_gpio(desc), np);
 		return ERR_PTR(-EINVAL);
 	}
 
-	if (name && of_property_read_string_index(np, "line-name",
-						  idx, name))
+	if (name && of_property_read_string(np, "line-name", name))
 		*name = np->name;
 
 	return desc;
@@ -676,27 +655,11 @@ static int of_gpiochip_add_hog(struct gpio_chip *chip, struct device_node *hog)
 	const char *name;
 	unsigned int i;
 	int ret;
-	int ncells, ngpios;
 
-	ncells = of_gpio_get_gpio_cells_size(chip->of_node);
-
-	ngpios = of_property_count_u32_elems(hog, "gpios");
-
-	ngpios /= ncells;
-	for (i = 0; i < ngpios; i++) {
+	for (i = 0;; i++) {
 		desc = of_parse_own_gpio(hog, chip, i, &name, &lflags, &dflags);
 		if (IS_ERR(desc))
 			break;
-
-		/* dflags is 0 for making pin in non-gpio mode */
-		if (!dflags) {
-			ret = chip->request(chip,
-					    gpio_chip_hwgpio(desc));
-			if (!ret)
-				chip->free(chip,
-					   gpio_chip_hwgpio(desc));
-			continue;
-		}
 
 		ret = gpiod_hog(desc, name, lflags, dflags);
 		if (ret < 0)
@@ -722,25 +685,10 @@ static int of_gpiochip_scan_gpios(struct gpio_chip *chip)
 {
 	struct device_node *np;
 	int ret;
-	int ncells, ngpios;
-
-	ncells = of_gpio_get_gpio_cells_size(chip->of_node);
-	if (ncells < 0)
-		return 0;
 
 	for_each_available_child_of_node(chip->of_node, np) {
 		if (!of_property_read_bool(np, "gpio-hog"))
 			continue;
-
-		ngpios = of_property_count_u32_elems(np, "gpios");
-		if (ngpios < 0)
-			continue;
-
-		if (ngpios % ncells) {
-			dev_warn(chip->parent, "Invalid GPIO entries at %s\n",
-				 np->name);
-			continue;
-		}
 
 		ret = of_gpiochip_add_hog(chip, np);
 		if (ret < 0) {
@@ -839,79 +787,6 @@ struct notifier_block gpio_of_notifier = {
 #endif /* CONFIG_OF_DYNAMIC */
 
 /**
- * of_gpiochip_suspend - Suspend GPIOs
- * @chip:	gpio chip to act on
- *
- */
-int of_gpiochip_suspend(struct gpio_chip *chip)
-{
-	struct gpio_desc *desc = NULL;
-	struct device_node *np;
-	const char *name;
-	unsigned long lflags;
-	enum gpiod_flags dflags;
-	int ret;
-	int i, ncells, ngpios;
-
-	for_each_available_child_of_node(chip->of_node, np) {
-		if (!of_property_read_bool(np, "gpio-suspend"))
-			continue;
-
-		ngpios = of_property_count_u32_elems(np, "gpios");
-		if (ngpios < 0)
-			continue;
-
-		if (ngpios % ncells) {
-			dev_warn(chip->parent, "Invalid GPIO entries at %s\n",
-				 np->name);
-			continue;
-		}
-
-		ngpios /= ncells;
-		for (i = 0; i < ngpios; i++) {
-			desc = of_parse_own_gpio(np, chip, i, &name,
-						 &lflags, &dflags);
-			if (IS_ERR(desc))
-				continue;
-
-			if (of_property_read_bool(np, "suspend-input")) {
-				dflags &= ~(GPIOD_OUT_HIGH | GPIOD_OUT_LOW);
-				dflags |= GPIOD_IN;
-			}
-			else if (of_property_read_bool(np, "suspend-output-low")) {
-				dflags &= ~(GPIOD_IN | GPIOD_OUT_HIGH);
-				dflags |= GPIOD_OUT_LOW;
-			}
-			else if (of_property_read_bool(np, "suspend-output-high")) {
-				dflags &= ~(GPIOD_IN | GPIOD_OUT_LOW);
-				dflags |= GPIOD_OUT_HIGH;
-			}
-
-			if (chip->suspend_configure) {
-				ret = chip->suspend_configure(chip,
-						gpio_chip_hwgpio(desc),
-						dflags);
-			} else {
-				if (dflags & GPIOD_FLAGS_BIT_DIR_OUT)
-					ret = chip->direction_output(chip,
-						gpio_chip_hwgpio(desc),
-						dflags & GPIOD_FLAGS_BIT_DIR_VAL);
-				else
-					ret = chip->direction_input(chip,
-							gpio_chip_hwgpio(desc));
-			}
-
-			if (ret < 0)
-				dev_warn(chip->parent, "Failed to configure gpio %d of node %s: %d\n",
-					 i, np->name, ret);
-		}
-	}
-
-	return 0;
-}
-
-
-/**
  * of_gpio_simple_xlate - translate gpiospec to the GPIO number and flags
  * @gc:		pointer to the gpio_chip structure
  * @gpiospec:	GPIO specifier as found in the device tree
@@ -988,7 +863,8 @@ int of_mm_gpiochip_add_data(struct device_node *np,
 	if (mm_gc->save_regs)
 		mm_gc->save_regs(mm_gc);
 
-	mm_gc->gc.of_node = np;
+	of_node_put(mm_gc->gc.of_node);
+	mm_gc->gc.of_node = of_node_get(np);
 
 	ret = gpiochip_add_data(gc, data);
 	if (ret)
@@ -996,6 +872,7 @@ int of_mm_gpiochip_add_data(struct device_node *np,
 
 	return 0;
 err2:
+	of_node_put(np);
 	iounmap(mm_gc->regs);
 err1:
 	kfree(gc->label);
@@ -1057,6 +934,11 @@ static int of_gpiochip_add_pin_range(struct gpio_chip *chip)
 
 	if (!np)
 		return 0;
+
+	if (!of_property_read_bool(np, "gpio-ranges") &&
+	    chip->of_gpio_ranges_fallback) {
+		return chip->of_gpio_ranges_fallback(chip, np);
+	}
 
 	group_names = of_find_property(np, group_names_propname, NULL);
 
@@ -1163,4 +1045,17 @@ int of_gpiochip_add(struct gpio_chip *chip)
 void of_gpiochip_remove(struct gpio_chip *chip)
 {
 	of_node_put(chip->of_node);
+}
+
+void of_gpio_dev_init(struct gpio_chip *gc, struct gpio_device *gdev)
+{
+	/* Set default OF node to parent's one if present */
+	if (gc->parent)
+		gdev->dev.of_node = gc->parent->of_node;
+
+	/* If the gpiochip has an assigned OF node this takes precedence */
+	if (gc->of_node)
+		gdev->dev.of_node = gc->of_node;
+	else
+		gc->of_node = gdev->dev.of_node;
 }

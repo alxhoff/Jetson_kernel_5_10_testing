@@ -15,11 +15,67 @@
 
 #include "internal.h"
 
-static const char *const regulator_states[(__force int) PM_SUSPEND_MAX + 1] = {
+static const char *const regulator_states[PM_SUSPEND_MAX + 1] = {
 	[PM_SUSPEND_STANDBY]	= "regulator-state-standby",
 	[PM_SUSPEND_MEM]	= "regulator-state-mem",
 	[PM_SUSPEND_MAX]	= "regulator-state-disk",
 };
+
+static void fill_limit(int *limit, int val)
+{
+	if (val)
+		if (val == 1)
+			*limit = REGULATOR_NOTIF_LIMIT_ENABLE;
+		else
+			*limit = val;
+	else
+		*limit = REGULATOR_NOTIF_LIMIT_DISABLE;
+}
+
+static void of_get_regulator_prot_limits(struct device_node *np,
+				struct regulation_constraints *constraints)
+{
+	u32 pval;
+	int i;
+	static const char *const props[] = {
+		"regulator-oc-%s-microamp",
+		"regulator-ov-%s-microvolt",
+		"regulator-temp-%s-kelvin",
+		"regulator-uv-%s-microvolt",
+	};
+	struct notification_limit *limits[] = {
+		&constraints->over_curr_limits,
+		&constraints->over_voltage_limits,
+		&constraints->temp_limits,
+		&constraints->under_voltage_limits,
+	};
+	bool set[4] = {0};
+
+	/* Protection limits: */
+	for (i = 0; i < ARRAY_SIZE(props); i++) {
+		char prop[255];
+		bool found;
+		int j;
+		static const char *const lvl[] = {
+			"protection", "error", "warn"
+		};
+		int *l[] = {
+			&limits[i]->prot, &limits[i]->err, &limits[i]->warn,
+		};
+
+		for (j = 0; j < ARRAY_SIZE(lvl); j++) {
+			snprintf(prop, 255, props[i], lvl[j]);
+			found = !of_property_read_u32(np, prop, &pval);
+			if (found)
+				fill_limit(l[j], pval);
+			set[i] |= found;
+		}
+	}
+	constraints->over_current_detection = set[0];
+	constraints->over_voltage_detection = set[1];
+	constraints->over_temp_detection = set[2];
+	constraints->under_voltage_detection = set[3];
+}
 
 static int of_get_regulation_constraints(struct device *dev,
 					struct device_node *np,
@@ -45,9 +101,6 @@ static int of_get_regulation_constraints(struct device *dev,
 
 	if (!of_property_read_u32(np, "regulator-max-microvolt", &pval))
 		constraints->max_uV = pval;
-
-	if (!of_property_read_u32(np, "regulator-init-microvolt", &pval))
-		constraints->init_uV = pval;
 
 	/* Voltage change possible? */
 	if (constraints->min_uV != constraints->max_uV)
@@ -78,9 +131,6 @@ static int of_get_regulation_constraints(struct device *dev,
 		constraints->valid_ops_mask |= REGULATOR_CHANGE_STATUS;
 
 	constraints->pull_down = of_property_read_bool(np, "regulator-pull-down");
-
-	if (of_find_property(np, "regulator-bypass-on", NULL))
-		constraints->bypass_on = true;
 
 	if (of_property_read_bool(np, "regulator-allow-bypass"))
 		constraints->valid_ops_mask |= REGULATOR_CHANGE_BYPASS;
@@ -194,8 +244,10 @@ static int of_get_regulation_constraints(struct device *dev,
 	constraints->over_current_protection = of_property_read_bool(np,
 					"regulator-over-current-protection");
 
+	of_get_regulator_prot_limits(np, constraints);
+
 	for (i = 0; i < ARRAY_SIZE(regulator_states); i++) {
-		switch ((__force suspend_state_t) i) {
+		switch (i) {
 		case PM_SUSPEND_MEM:
 			suspend_state = &constraints->state_mem;
 			break;
@@ -212,8 +264,12 @@ static int of_get_regulation_constraints(struct device *dev,
 		}
 
 		suspend_np = of_get_child_by_name(np, regulator_states[i]);
-		if (!suspend_np || !suspend_state)
+		if (!suspend_np)
 			continue;
+		if (!suspend_state) {
+			of_node_put(suspend_np);
+			continue;
+		}
 
 		if (!of_property_read_u32(suspend_np, "regulator-mode",
 					  &pval)) {
@@ -255,7 +311,7 @@ static int of_get_regulation_constraints(struct device *dev,
 					"regulator-changeable-in-suspend"))
 			suspend_state->changeable = true;
 
-		if ((__force suspend_state_t) i == PM_SUSPEND_MEM)
+		if (i == PM_SUSPEND_MEM)
 			constraints->initial_state = PM_SUSPEND_MEM;
 
 		of_node_put(suspend_np);
@@ -419,12 +475,20 @@ device_node *regulator_of_get_init_node(struct device *dev,
 
 	for_each_available_child_of_node(search, child) {
 		name = of_get_property(child, "regulator-compatible", NULL);
-		if (!name)
-			name = child->name;
+		if (!name) {
+			if (!desc->of_match_full_name)
+				name = child->name;
+			else
+				name = child->full_name;
+		}
 
 		if (!strcmp(desc->of_match, name)) {
 			of_node_put(search);
-			return of_node_get(child);
+			/*
+			 * 'of_node_get(child)' is already performed by the
+			 * for_each loop.
+			 */
+			return child;
 		}
 	}
 

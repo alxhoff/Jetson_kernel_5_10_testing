@@ -393,7 +393,8 @@ static int max98090_put_enab_tlv(struct snd_kcontrol *kcontrol,
 	struct soc_mixer_control *mc =
 		(struct soc_mixer_control *)kcontrol->private_value;
 	unsigned int mask = (1 << fls(mc->max)) - 1;
-	unsigned int sel = ucontrol->value.integer.value[0];
+	int sel_unchecked = ucontrol->value.integer.value[0];
+	unsigned int sel;
 	unsigned int val = snd_soc_component_read(component, mc->reg);
 	unsigned int *select;
 
@@ -413,8 +414,9 @@ static int max98090_put_enab_tlv(struct snd_kcontrol *kcontrol,
 
 	val = (val >> mc->shift) & mask;
 
-	if (sel < 0 || sel > mc->max)
+	if (sel_unchecked < 0 || sel_unchecked > mc->max)
 		return -EINVAL;
+	sel = sel_unchecked;
 
 	*select = sel;
 
@@ -1835,7 +1837,7 @@ static const struct dmic_table dmic_table[] = { /* One for each pclk freq. */
 static int max98090_find_divisor(int target_freq, int pclk)
 {
 	int current_diff = INT_MAX;
-	int test_diff = INT_MAX;
+	int test_diff;
 	int divisor_index = 0;
 	int i;
 
@@ -2161,13 +2163,11 @@ static void max98090_jack_work(struct work_struct *work)
 
 		msleep(50);
 
-		reg = snd_soc_component_read(component, M98090_REG_JACK_STATUS);
+		snd_soc_component_read(component, M98090_REG_JACK_STATUS);
 
 		/* Weak pull up allows only insertion detection */
 		snd_soc_component_update_bits(component, M98090_REG_JACK_DETECT,
 			M98090_JDWK_MASK, M98090_JDWK_MASK);
-	} else {
-		reg = snd_soc_component_read(component, M98090_REG_JACK_STATUS);
 	}
 
 	reg = snd_soc_component_read(component, M98090_REG_JACK_STATUS);
@@ -2671,12 +2671,14 @@ static const struct i2c_device_id max98090_i2c_id[] = {
 };
 MODULE_DEVICE_TABLE(i2c, max98090_i2c_id);
 
+#ifdef CONFIG_OF
 static const struct of_device_id max98090_of_match[] = {
 	{ .compatible = "maxim,max98090", },
 	{ .compatible = "maxim,max98091", },
 	{ }
 };
 MODULE_DEVICE_TABLE(of, max98090_of_match);
+#endif
 
 #ifdef CONFIG_ACPI
 static const struct acpi_device_id max98090_acpi_match[] = {

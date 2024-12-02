@@ -4385,8 +4385,8 @@ static int rt5665_set_component_pll(struct snd_soc_component *component, int pll
 	snd_soc_component_write(component, RT5665_PLL_CTRL_1,
 		pll_code.n_code << RT5665_PLL_N_SFT | pll_code.k_code);
 	snd_soc_component_write(component, RT5665_PLL_CTRL_2,
-		(pll_code.m_bp ? 0 : pll_code.m_code) << RT5665_PLL_M_SFT |
-		pll_code.m_bp << RT5665_PLL_M_BP_SFT);
+		((pll_code.m_bp ? 0 : pll_code.m_code) << RT5665_PLL_M_SFT) |
+		(pll_code.m_bp << RT5665_PLL_M_BP_SFT));
 
 	rt5665->pll_in = freq_in;
 	rt5665->pll_out = freq_out;
@@ -4472,6 +4472,8 @@ static void rt5665_remove(struct snd_soc_component *component)
 	struct rt5665_priv *rt5665 = snd_soc_component_get_drvdata(component);
 
 	regmap_write(rt5665->regmap, RT5665_RESET, 0);
+
+	regulator_bulk_disable(ARRAY_SIZE(rt5665->supplies), rt5665->supplies);
 }
 
 #ifdef CONFIG_PM

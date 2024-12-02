@@ -3,7 +3,6 @@
  * USB GPIO Based Connection Detection Driver
  *
  * Copyright (C) 2019 MediaTek Inc.
- * Copyright (c) 2021, NVIDIA CORPORATION. All rights reserved.
  *
  * Author: Chunfeng Yun <chunfeng.yun@mediatek.com>
  *
@@ -32,7 +31,6 @@ struct usb_conn_info {
 	struct device *dev;
 	struct usb_role_switch *role_sw;
 	enum usb_role last_role;
-	enum usb_role init_role;
 	struct regulator *vbus;
 	struct delayed_work dw_det;
 	unsigned long debounce_jiffies;
@@ -44,6 +42,7 @@ struct usb_conn_info {
 
 	struct power_supply_desc desc;
 	struct power_supply *charger;
+	bool initial_detection;
 };
 
 /*
@@ -85,13 +84,15 @@ static void usb_conn_detect_cable(struct work_struct *work)
 	else
 		role = USB_ROLE_NONE;
 
-	dev_dbg(info->dev, "role %d/%d, gpios: id %d, vbus %d\n",
-		info->last_role, role, id, vbus);
+	dev_dbg(info->dev, "role %s -> %s, gpios: id %d, vbus %d\n",
+		usb_role_string(info->last_role), usb_role_string(role), id, vbus);
 
-	if (info->last_role == role) {
-		dev_warn(info->dev, "repeated role: %d\n", role);
+	if (!info->initial_detection && info->last_role == role) {
+		dev_warn(info->dev, "repeated role: %s\n", usb_role_string(role));
 		return;
 	}
+
+	info->initial_detection = false;
 
 	if (info->last_role == USB_ROLE_HOST && info->vbus)
 		regulator_disable(info->vbus);
@@ -194,11 +195,8 @@ static int usb_conn_probe(struct platform_device *pdev)
 		return PTR_ERR(info->vbus_gpiod);
 
 	if (!info->id_gpiod && !info->vbus_gpiod) {
-		if (of_property_read_u32(dev->of_node, "cable-connected-on-boot",
-			&(info->init_role))) {
-			dev_err(dev, "failed to get gpios\n");
-			return -ENODEV;
-		}
+		dev_err(dev, "failed to get gpios\n");
+		return -ENODEV;
 	}
 
 	if (info->id_gpiod)
@@ -228,18 +226,14 @@ static int usb_conn_probe(struct platform_device *pdev)
 	}
 
 	if (IS_ERR(info->vbus)) {
-		if (PTR_ERR(info->vbus) != -EPROBE_DEFER)
-			dev_err(dev, "failed to get vbus: %ld\n", PTR_ERR(info->vbus));
-		return PTR_ERR(info->vbus);
+		ret = PTR_ERR(info->vbus);
+		return dev_err_probe(dev, ret, "failed to get vbus :%d\n", ret);
 	}
 
 	info->role_sw = usb_role_switch_get(dev);
-	if (IS_ERR(info->role_sw)) {
-		if (PTR_ERR(info->role_sw) != -EPROBE_DEFER)
-			dev_err(dev, "failed to get role switch\n");
-
-		return PTR_ERR(info->role_sw);
-	}
+	if (IS_ERR(info->role_sw))
+		return dev_err_probe(dev, PTR_ERR(info->role_sw),
+				     "failed to get role switch\n");
 
 	ret = usb_conn_psy_register(info);
 	if (ret)
@@ -282,15 +276,8 @@ static int usb_conn_probe(struct platform_device *pdev)
 	platform_set_drvdata(pdev, info);
 
 	/* Perform initial detection */
-	if (info->id_gpiod || info->vbus_gpiod) {
-		usb_conn_queue_dwork(info, 0);
-	} else {
-		dev_info(dev, "Cable %d connected on boot\n",
-				info->init_role);
-		ret = usb_role_switch_set_role(info->role_sw, info->init_role);
-		if (ret)
-			dev_err(info->dev, "failed to set role: %d\n", ret);
-	}
+	info->initial_detection = true;
+	usb_conn_queue_dwork(info, 0);
 
 	return 0;
 
@@ -330,7 +317,6 @@ static int __maybe_unused usb_conn_suspend(struct device *dev)
 static int __maybe_unused usb_conn_resume(struct device *dev)
 {
 	struct usb_conn_info *info = dev_get_drvdata(dev);
-	int ret = 0;
 
 	pinctrl_pm_select_default_state(dev);
 
@@ -339,15 +325,7 @@ static int __maybe_unused usb_conn_resume(struct device *dev)
 	if (info->vbus_gpiod)
 		enable_irq(info->vbus_irq);
 
-	if (info->id_gpiod || info->vbus_gpiod) {
-		usb_conn_queue_dwork(info, 0);
-	} else {
-		dev_info(dev, "Cable %d connected on boot\n",
-				info->init_role);
-		ret = usb_role_switch_set_role(info->role_sw, info->init_role);
-		if (ret)
-			dev_err(info->dev, "failed to set role: %d\n", ret);
-	}
+	usb_conn_queue_dwork(info, 0);
 
 	return 0;
 }

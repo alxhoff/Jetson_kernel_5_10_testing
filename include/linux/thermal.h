@@ -17,8 +17,7 @@
 #include <linux/workqueue.h>
 #include <uapi/linux/thermal.h>
 
-#define THERMAL_TRIPS_NONE	-1
-#define THERMAL_MAX_TRIPS	48
+#define THERMAL_MAX_TRIPS	12
 
 /* invalid cooling state */
 #define THERMAL_CSTATE_INVALID -1UL
@@ -77,8 +76,8 @@ struct thermal_zone_device_ops {
 	int (*set_emul_temp) (struct thermal_zone_device *, int);
 	int (*get_trend) (struct thermal_zone_device *, int,
 			  enum thermal_trend *);
-	int (*notify) (struct thermal_zone_device *, int,
-		       enum thermal_trip_type);
+	void (*hot)(struct thermal_zone_device *);
+	void (*critical)(struct thermal_zone_device *);
 };
 
 struct thermal_cooling_device_ops {
@@ -92,7 +91,8 @@ struct thermal_cooling_device_ops {
 
 struct thermal_cooling_device {
 	int id;
-	char type[THERMAL_NAME_LENGTH];
+	char *type;
+	unsigned long max_state;
 	struct device device;
 	struct device_node *np;
 	void *devdata;
@@ -114,11 +114,11 @@ struct thermal_cooling_device {
  * @trip_hyst_attrs:	attributes for trip points for sysfs: trip hysteresis
  * @mode:		current mode of this thermal zone
  * @devdata:	private pointer for device private data
- * @trips:	number of trip points the thermal zone supports
+ * @num_trips:	number of trip points the thermal zone supports
  * @trips_disabled;	bitmap for disabled trips
- * @passive_delay:	number of milliseconds to wait between polls when
+ * @passive_delay_jiffies: number of jiffies to wait between polls when
  *			performing passive cooling.
- * @polling_delay:	number of milliseconds to wait between polls when
+ * @polling_delay_jiffies: number of jiffies to wait between polls when
  *			checking whether trip points have been crossed (0 for
  *			interrupt driven systems)
  * @temperature:	current temperature.  This is only for core code,
@@ -131,9 +131,6 @@ struct thermal_cooling_device {
 			trip point.
  * @prev_high_trip:	the above current temperature if you've crossed a
 			passive trip point.
- * @forced_passive:	If > 0, temperature at which to switch on all ACPI
- *			processor cooling devices.  Currently only used by the
- *			step-wise governor.
  * @need_update:	if equals 1, thermal_zone_device_update needs to be invoked.
  * @ops:	operations this &thermal_zone_device supports
  * @tzp:	thermal zone parameters
@@ -151,24 +148,22 @@ struct thermal_zone_device {
 	int id;
 	char type[THERMAL_NAME_LENGTH];
 	struct device device;
-	struct device_node *np;
 	struct attribute_group trips_attribute_group;
 	struct thermal_attr *trip_temp_attrs;
 	struct thermal_attr *trip_type_attrs;
 	struct thermal_attr *trip_hyst_attrs;
 	enum thermal_device_mode mode;
 	void *devdata;
-	int trips;
+	int num_trips;
 	unsigned long trips_disabled;	/* bitmap for disabled trips */
-	int passive_delay;
-	int polling_delay;
+	unsigned long passive_delay_jiffies;
+	unsigned long polling_delay_jiffies;
 	int temperature;
 	int last_temperature;
 	int emul_temperature;
 	int passive;
 	int prev_low_trip;
 	int prev_high_trip;
-	unsigned int forced_passive;
 	atomic_t need_update;
 	struct thermal_zone_device_ops *ops;
 	struct thermal_zone_params *tzp;
@@ -199,7 +194,6 @@ struct thermal_governor {
 	int (*bind_to_tz)(struct thermal_zone_device *tz);
 	void (*unbind_from_tz)(struct thermal_zone_device *tz);
 	int (*throttle)(struct thermal_zone_device *tz, int trip);
-	int (*of_parse)(struct thermal_zone_params *tp, struct device_node *np);
 	struct list_head	governor_list;
 };
 
@@ -223,7 +217,7 @@ struct thermal_bind_params {
 	 * thermal zone and cdev, for a particular trip point.
 	 * See Documentation/driver-api/thermal/sysfs-api.rst for more information.
 	 */
-	u64 trip_mask;
+	int trip_mask;
 
 	/*
 	 * This is an array of cooling state limits. Must have exactly
@@ -241,7 +235,6 @@ struct thermal_bind_params {
 /* Structure to define Thermal Zone parameters */
 struct thermal_zone_params {
 	char governor_name[THERMAL_NAME_LENGTH];
-	void *governor_params;
 
 	/*
 	 * a boolean to indicate if the thermal to hwmon sysfs interface
@@ -293,7 +286,7 @@ struct thermal_zone_params {
 };
 
 /**
- * struct thermal_zone_of_device_ops - scallbacks for handling DT based zones
+ * struct thermal_zone_of_device_ops - callbacks for handling DT based zones
  *
  * Mandatory:
  * @get_temp: a pointer to a function that reads the sensor temperature.
@@ -368,7 +361,7 @@ void devm_thermal_zone_of_sensor_unregister(struct device *dev,
 #endif
 
 #ifdef CONFIG_THERMAL
-struct thermal_zone_device *thermal_zone_device_register(const char *, int, u64,
+struct thermal_zone_device *thermal_zone_device_register(const char *, int, int,
 		void *, struct thermal_zone_device_ops *,
 		struct thermal_zone_params *, int, int);
 void thermal_zone_device_unregister(struct thermal_zone_device *);
@@ -394,19 +387,16 @@ devm_thermal_of_cooling_device_register(struct device *dev,
 				const struct thermal_cooling_device_ops *ops);
 void thermal_cooling_device_unregister(struct thermal_cooling_device *);
 struct thermal_zone_device *thermal_zone_get_zone_by_name(const char *name);
-struct thermal_zone_device *
-thermal_zone_get_zone_by_node(struct device_node *node);
 int thermal_zone_get_temp(struct thermal_zone_device *tz, int *temp);
 int thermal_zone_get_slope(struct thermal_zone_device *tz);
 int thermal_zone_get_offset(struct thermal_zone_device *tz);
 
-void thermal_cdev_update(struct thermal_cooling_device *);
-void thermal_notify_framework(struct thermal_zone_device *, int);
 int thermal_zone_device_enable(struct thermal_zone_device *tz);
 int thermal_zone_device_disable(struct thermal_zone_device *tz);
+void thermal_zone_device_critical(struct thermal_zone_device *tz);
 #else
 static inline struct thermal_zone_device *thermal_zone_device_register(
-	const char *type, int trips, u64 mask, void *devdata,
+	const char *type, int trips, int mask, void *devdata,
 	struct thermal_zone_device_ops *ops,
 	struct thermal_zone_params *tzp,
 	int passive_delay, int polling_delay)
@@ -437,9 +427,6 @@ static inline void thermal_cooling_device_unregister(
 static inline struct thermal_zone_device *thermal_zone_get_zone_by_name(
 		const char *name)
 { return ERR_PTR(-ENODEV); }
-static inline struct thermal_zone_device *thermal_zone_get_zone_by_node(
-		struct device_node *node)
-{ return ERR_PTR(-ENODEV); }
 static inline int thermal_zone_get_temp(
 		struct thermal_zone_device *tz, int *temp)
 { return -ENODEV; }
@@ -449,12 +436,6 @@ static inline int thermal_zone_get_slope(
 static inline int thermal_zone_get_offset(
 		struct thermal_zone_device *tz)
 { return -ENODEV; }
-
-static inline void thermal_cdev_update(struct thermal_cooling_device *cdev)
-{ }
-static inline void thermal_notify_framework(struct thermal_zone_device *tz,
-	int trip)
-{ }
 
 static inline int thermal_zone_device_enable(struct thermal_zone_device *tz)
 { return -ENODEV; }

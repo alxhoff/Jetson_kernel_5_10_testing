@@ -2,15 +2,13 @@
 /*
  * Alarmtimer interface
  *
- * Copyright (C) 2016-2017 NVIDIA CORPORATION. All rights reserved.
- *
- * This interface provides a timer which is similarto hrtimers,
+ * This interface provides a timer which is similar to hrtimers,
  * but triggers a RTC alarm if the box is suspend.
  *
  * This interface is influenced by the Android RTC Alarm timer
  * interface.
  *
- * Copyright (C) 2010 IBM Corperation
+ * Copyright (C) 2010 IBM Corporation
  *
  * Author: John Stultz <john.stultz@linaro.org>
  */
@@ -94,7 +92,7 @@ static int alarmtimer_rtc_add_device(struct device *dev,
 	if (rtcdev)
 		return -EBUSY;
 
-	if (!rtc->ops->set_alarm)
+	if (!test_bit(RTC_FEATURE_ALARM, rtc->features))
 		return -1;
 	if (!device_may_wakeup(rtc->dev.parent))
 		return -1;
@@ -472,11 +470,35 @@ u64 alarm_forward(struct alarm *alarm, ktime_t now, ktime_t interval)
 }
 EXPORT_SYMBOL_GPL(alarm_forward);
 
-u64 alarm_forward_now(struct alarm *alarm, ktime_t interval)
+static u64 __alarm_forward_now(struct alarm *alarm, ktime_t interval, bool throttle)
 {
 	struct alarm_base *base = &alarm_bases[alarm->type];
+	ktime_t now = base->get_ktime();
 
-	return alarm_forward(alarm, base->get_ktime(), interval);
+	if (IS_ENABLED(CONFIG_HIGH_RES_TIMERS) && throttle) {
+		/*
+		 * Same issue as with posix_timer_fn(). Timers which are
+		 * periodic but the signal is ignored can starve the system
+		 * with a very small interval. The real fix which was
+		 * promised in the context of posix_timer_fn() never
+		 * materialized, but someone should really work on it.
+		 *
+		 * To prevent DOS fake @now to be 1 jiffie out which keeps
+		 * the overrun accounting correct but creates an
+		 * inconsistency vs. timer_gettime(2).
+		 */
+		ktime_t kj = NSEC_PER_SEC / HZ;
+
+		if (interval < kj)
+			now = ktime_add(now, kj);
+	}
+
+	return alarm_forward(alarm, now, interval);
+}
+
+u64 alarm_forward_now(struct alarm *alarm, ktime_t interval)
+{
+	return __alarm_forward_now(alarm, interval, false);
 }
 EXPORT_SYMBOL_GPL(alarm_forward_now);
 
@@ -523,14 +545,17 @@ static enum alarmtimer_type clock2alarm(clockid_t clockid)
 		return ALARM_REALTIME;
 	if (clockid == CLOCK_BOOTTIME_ALARM)
 		return ALARM_BOOTTIME;
-	return ALARM_UNDEFINED;
+	return -1;
 }
 
 /**
  * alarm_handle_timer - Callback for posix timers
  * @alarm: alarm that fired
+ * @now: time at the timer expiration
  *
  * Posix timer callback for expired alarm timers.
+ *
+ * Return: whether the timer is to be restarted
  */
 static enum alarmtimer_restart alarm_handle_timer(struct alarm *alarm,
 							ktime_t now)
@@ -550,9 +575,10 @@ static enum alarmtimer_restart alarm_handle_timer(struct alarm *alarm,
 	if (posix_timer_event(ptr, si_private) && ptr->it_interval) {
 		/*
 		 * Handle ignored signals and rearm the timer. This will go
-		 * away once we handle ignored signals proper.
+		 * away once we handle ignored signals proper. Ensure that
+		 * small intervals cannot starve the system.
 		 */
-		ptr->it_overrun += alarm_forward_now(alarm, ptr->it_interval);
+		ptr->it_overrun += __alarm_forward_now(alarm, ptr->it_interval, true);
 		++ptr->it_requeue_pending;
 		ptr->it_active = 1;
 		result = ALARMTIMER_RESTART;
@@ -667,13 +693,7 @@ static int alarm_clock_getres(const clockid_t which_clock, struct timespec64 *tp
  */
 static int alarm_clock_get_timespec(clockid_t which_clock, struct timespec64 *tp)
 {
-	enum alarmtimer_type type = clock2alarm(which_clock);
-	struct alarm_base *base;
-
-	if (type == ALARM_UNDEFINED)
-		return -EINVAL;
-
-	base = &alarm_bases[type];
+	struct alarm_base *base = &alarm_bases[clock2alarm(which_clock)];
 
 	if (!alarmtimer_get_rtcdev())
 		return -EINVAL;
@@ -716,10 +736,6 @@ static int alarm_timer_create(struct k_itimer *new_timer)
 		return -EPERM;
 
 	type = clock2alarm(new_timer->it_clock);
-
-	if (type == ALARM_UNDEFINED)
-		return -EINVAL;
-
 	alarm_init(&new_timer->it.alarm.alarmtimer, type, alarm_handle_timer);
 	return 0;
 }
@@ -727,8 +743,11 @@ static int alarm_timer_create(struct k_itimer *new_timer)
 /**
  * alarmtimer_nsleep_wakeup - Wakeup function for alarm_timer_nsleep
  * @alarm: ptr to alarm that fired
+ * @now: time at the timer expiration
  *
  * Wakes up the task that set the alarmtimer
+ *
+ * Return: ALARMTIMER_NORESTART
  */
 static enum alarmtimer_restart alarmtimer_nsleep_wakeup(struct alarm *alarm,
 								ktime_t now)
@@ -745,6 +764,7 @@ static enum alarmtimer_restart alarmtimer_nsleep_wakeup(struct alarm *alarm,
  * alarmtimer_do_nsleep - Internal alarmtimer nsleep implementation
  * @alarm: ptr to alarmtimer
  * @absexp: absolute expiration time
+ * @type: alarm type (BOOTTIME/REALTIME).
  *
  * Sets the alarm timer and sleeps until it is fired or interrupted.
  */
@@ -816,9 +836,8 @@ static long __sched alarm_timer_nsleep_restart(struct restart_block *restart)
 /**
  * alarm_timer_nsleep - alarmtimer nanosleep
  * @which_clock: clockid
- * @flags: determins abstime or relative
+ * @flags: determines abstime or relative
  * @tsreq: requested sleep time (abs or rel)
- * @rmtp: remaining sleep time saved
  *
  * Handles clock_nanosleep calls against _ALARM clockids
  */
@@ -839,9 +858,6 @@ static int alarm_timer_nsleep(const clockid_t which_clock, int flags,
 
 	if (!capable(CAP_WAKE_ALARM))
 		return -EPERM;
-
-	if (type == ALARM_UNDEFINED)
-		return -EINVAL;
 
 	alarm_init_on_stack(&alarm, type, alarmtimer_nsleep_wakeup);
 

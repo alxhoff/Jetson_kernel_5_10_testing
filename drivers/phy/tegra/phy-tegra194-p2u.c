@@ -2,7 +2,7 @@
 /*
  * P2U (PIPE to UPHY) driver for Tegra T194 SoC
  *
- * Copyright (c) 2019-2022, NVIDIA CORPORATION. All rights reserved.
+ * Copyright (C) 2019-2022 NVIDIA Corporation.
  *
  * Author: Vidya Sagar <vidyas@nvidia.com>
  */
@@ -18,8 +18,8 @@
 #include <soc/tegra/bpmp-abi.h>
 
 #define P2U_CONTROL_CMN			0x74
-#define P2U_CONTROL_CMN_ENABLE_L2_EXIT_RATE_CHANGE	BIT(13)
-#define P2U_CONTROL_CMN_SKP_SIZE_PROTECTION_EN		BIT(20)
+#define P2U_CONTROL_CMN_ENABLE_L2_EXIT_RATE_CHANGE		BIT(13)
+#define P2U_CONTROL_CMN_SKP_SIZE_PROTECTION_EN			BIT(20)
 
 #define P2U_CONTROL_GEN1	0x78U
 #define P2U_CONTROL_GEN1_ENABLE_RXIDLE_ENTRY_ON_LINK_STATUS	BIT(2)
@@ -87,7 +87,7 @@ struct tegra_p2u_of_data {
 
 struct tegra_p2u {
 	void __iomem *base;
-	bool skip_sz_protection_en;	/* Needed to support two retimers */
+	bool skip_sz_protection_en; /* Needed to support two retimers */
 	struct tegra_p2u_of_data *of_data;
 	struct device *dev;
 	struct tegra_bpmp *bpmp;
@@ -155,7 +155,7 @@ static int tegra_p2u_power_on(struct phy *x)
 		p2u_writel(phy, val, P2U_DIR_SEARCH_CTRL);
 	}
 
-	if (phy->of_data->lane_margin) {
+	if (phy->of_data->lane_margin && phy->bpmp) {
 		val = P2U_RX_MARGIN_SW_INT_EN_READINESS |
 		      P2U_RX_MARGIN_SW_INT_EN_MARGIN_START |
 		      P2U_RX_MARGIN_SW_INT_EN_MARGIN_CHANGE |
@@ -171,7 +171,7 @@ static int tegra_p2u_power_on(struct phy *x)
 	return 0;
 }
 
-int tegra_p2u_calibrate(struct phy *x)
+static int tegra_p2u_calibrate(struct phy *x)
 {
 	struct tegra_p2u *phy = phy_get_drvdata(x);
 	u32 val;
@@ -385,9 +385,8 @@ static int tegra_p2u_probe(struct platform_device *pdev)
 	struct device *dev = &pdev->dev;
 	struct phy *generic_phy;
 	struct tegra_p2u *phy;
-	struct resource *res;
+	int irq = -ENODEV;
 	int ret;
-	u32 irq;
 
 	phy = devm_kzalloc(dev, sizeof(*phy), GFP_KERNEL);
 	if (!phy)
@@ -401,8 +400,7 @@ static int tegra_p2u_probe(struct platform_device *pdev)
 	phy->dev = dev;
 	platform_set_drvdata(pdev, phy);
 
-	res = platform_get_resource_byname(pdev, IORESOURCE_MEM, "ctl");
-	phy->base = devm_ioremap_resource(dev, res);
+	phy->base = devm_platform_ioremap_resource_byname(pdev, "ctl");
 	if (IS_ERR(phy->base))
 		return PTR_ERR(phy->base);
 
@@ -422,15 +420,14 @@ static int tegra_p2u_probe(struct platform_device *pdev)
 	if (IS_ERR(phy_provider))
 		return PTR_ERR(phy_provider);
 
-	if (phy->of_data->lane_margin) {
+	if (phy->of_data->lane_margin)
+		irq = platform_get_irq_byname(pdev, "intr");
+
+	if (irq < 0) {
+		dev_warn(dev, "Device tree update required to enable lane margining\n");
+	} else {
 		spin_lock_init(&phy->next_state_lock);
 		INIT_WORK(&phy->rx_margin_work, rx_margin_work_fn);
-
-		irq = platform_get_irq_byname(pdev, "intr");
-		if (!irq) {
-			dev_err(dev, "failed to get intr interrupt\n");
-			return irq;
-		}
 
 		ret = devm_request_irq(&pdev->dev, irq, tegra_p2u_irq_handler,
 				       0, "tegra-p2u-intr", phy);
@@ -458,19 +455,19 @@ static int tegra_p2u_remove(struct platform_device *pdev)
 {
 	struct tegra_p2u *phy = platform_get_drvdata(pdev);
 
-	if (phy->of_data->lane_margin)
+	if (phy->bpmp)
 		tegra_bpmp_put(phy->bpmp);
 
 	return 0;
 }
 
-static const struct tegra_p2u_of_data tegra_p2u_of_data_t194 = {
+static const struct tegra_p2u_of_data tegra194_p2u_of_data = {
 	.one_dir_search = false,
 	.lane_margin = false,
 	.eios_override = true,
 };
 
-static const struct tegra_p2u_of_data tegra_p2u_of_data_t234 = {
+static const struct tegra_p2u_of_data tegra234_p2u_of_data = {
 	.one_dir_search = true,
 	.lane_margin = true,
 	.eios_override = false,
@@ -479,11 +476,11 @@ static const struct tegra_p2u_of_data tegra_p2u_of_data_t234 = {
 static const struct of_device_id tegra_p2u_id_table[] = {
 	{
 		.compatible = "nvidia,tegra194-p2u",
-		.data = &tegra_p2u_of_data_t194,
+		.data = &tegra194_p2u_of_data,
 	},
 	{
 		.compatible = "nvidia,tegra234-p2u",
-		.data = &tegra_p2u_of_data_t234,
+		.data = &tegra234_p2u_of_data,
 	},
 	{}
 };

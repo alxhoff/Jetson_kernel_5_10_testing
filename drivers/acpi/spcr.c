@@ -55,8 +55,7 @@ static bool xgene_8250_erratum_present(struct acpi_table_spcr *tb)
 		return false;
 
 	if (memcmp(tb->header.oem_id, "APMC0D", ACPI_OEM_ID_SIZE) &&
-	    memcmp(tb->header.oem_id, "HPE   ", ACPI_OEM_ID_SIZE) &&
-	    memcmp(tb->header.oem_id, "NVIDIA", ACPI_OEM_ID_SIZE))
+	    memcmp(tb->header.oem_id, "HPE   ", ACPI_OEM_ID_SIZE))
 		return false;
 
 	if (!memcmp(tb->header.oem_table_id, "XGENESPC",
@@ -65,10 +64,6 @@ static bool xgene_8250_erratum_present(struct acpi_table_spcr *tb)
 
 	if (!memcmp(tb->header.oem_table_id, "ProLiant",
 	    ACPI_OEM_TABLE_ID_SIZE) && tb->header.oem_revision == 1)
-		xgene_8250 = true;
-
-	if (!memcmp(tb->header.oem_table_id, "TEGRAUAR",
-	    ACPI_OEM_TABLE_ID_SIZE) && tb->header.oem_revision == 0)
 		xgene_8250 = true;
 
 	return xgene_8250;
@@ -141,6 +136,7 @@ int __init acpi_parse_spcr(bool enable_earlycon, bool enable_console)
 		break;
 	case ACPI_DBG2_16550_COMPATIBLE:
 	case ACPI_DBG2_16550_SUBSET:
+	case ACPI_DBG2_16550_WITH_GAS:
 		uart = "uart";
 		break;
 	default:

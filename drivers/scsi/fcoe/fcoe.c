@@ -293,7 +293,7 @@ static int fcoe_interface_setup(struct fcoe_interface *fcoe,
 	struct fcoe_ctlr *fip = fcoe_to_ctlr(fcoe);
 	struct netdev_hw_addr *ha;
 	struct net_device *real_dev;
-	u8 flogi_maddr[ETH_ALEN];
+	static const u8 flogi_maddr[ETH_ALEN] = FC_FCOE_FLOGI_MAC;
 	const struct net_device_ops *ops;
 
 	fcoe->netdev = netdev;
@@ -336,7 +336,6 @@ static int fcoe_interface_setup(struct fcoe_interface *fcoe,
 	 * or enter promiscuous mode if not capable of listening
 	 * for multiple unicast MACs.
 	 */
-	memcpy(flogi_maddr, (u8[6]) FC_FCOE_FLOGI_MAC, ETH_ALEN);
 	dev_uc_add(netdev, flogi_maddr);
 	if (fip->spma)
 		dev_uc_add(netdev, fip->ctl_src_addr);
@@ -442,7 +441,7 @@ static void fcoe_interface_remove(struct fcoe_interface *fcoe)
 {
 	struct net_device *netdev = fcoe->netdev;
 	struct fcoe_ctlr *fip = fcoe_to_ctlr(fcoe);
-	u8 flogi_maddr[ETH_ALEN];
+	static const u8 flogi_maddr[ETH_ALEN] = FC_FCOE_FLOGI_MAC;
 	const struct net_device_ops *ops;
 
 	/*
@@ -458,7 +457,6 @@ static void fcoe_interface_remove(struct fcoe_interface *fcoe)
 	synchronize_net();
 
 	/* Delete secondary MAC addresses */
-	memcpy(flogi_maddr, (u8[6]) FC_FCOE_FLOGI_MAC, ETH_ALEN);
 	dev_uc_del(netdev, flogi_maddr);
 	if (fip->spma)
 		dev_uc_del(netdev, fip->ctl_src_addr);
@@ -1452,11 +1450,11 @@ err2:
 static int fcoe_alloc_paged_crc_eof(struct sk_buff *skb, int tlen)
 {
 	struct fcoe_percpu_s *fps;
-	int rc;
+	int rc, cpu = get_cpu_light();
 
-	fps = &get_cpu_var(fcoe_percpu);
+	fps = &per_cpu(fcoe_percpu, cpu);
 	rc = fcoe_get_paged_crc_eof(skb, tlen, fps);
-	put_cpu_var(fcoe_percpu);
+	put_cpu_light();
 
 	return rc;
 }
@@ -1641,11 +1639,11 @@ static inline int fcoe_filter_frames(struct fc_lport *lport,
 		return 0;
 	}
 
-	stats = per_cpu_ptr(lport->stats, get_cpu());
+	stats = per_cpu_ptr(lport->stats, get_cpu_light());
 	stats->InvalidCRCCount++;
 	if (stats->InvalidCRCCount < 5)
 		printk(KERN_WARNING "fcoe: dropping frame with CRC error\n");
-	put_cpu();
+	put_cpu_light();
 	return -EINVAL;
 }
 
@@ -1686,7 +1684,7 @@ static void fcoe_recv_frame(struct sk_buff *skb)
 	 */
 	hp = (struct fcoe_hdr *) skb_network_header(skb);
 
-	stats = per_cpu_ptr(lport->stats, get_cpu());
+	stats = per_cpu_ptr(lport->stats, get_cpu_light());
 	if (unlikely(FC_FCOE_DECAPS_VER(hp) != FC_FCOE_VER)) {
 		if (stats->ErrorFrames < 5)
 			printk(KERN_WARNING "fcoe: FCoE version "
@@ -1718,13 +1716,13 @@ static void fcoe_recv_frame(struct sk_buff *skb)
 		goto drop;
 
 	if (!fcoe_filter_frames(lport, fp)) {
-		put_cpu();
+		put_cpu_light();
 		fc_exch_recv(lport, fp);
 		return;
 	}
 drop:
 	stats->ErrorFrames++;
-	put_cpu();
+	put_cpu_light();
 	kfree_skb(skb);
 }
 
@@ -1894,7 +1892,6 @@ static int fcoe_device_notification(struct notifier_block *notifier,
 		mutex_unlock(&fcoe_config_mutex);
 		fcoe_ctlr_device_delete(fcoe_ctlr_to_ctlr_dev(ctlr));
 		goto out;
-		break;
 	case NETDEV_FEAT_CHANGE:
 		fcoe_netdev_features_change(lport, netdev);
 		break;
@@ -2024,7 +2021,7 @@ static int fcoe_ctlr_enabled(struct fcoe_ctlr_device *cdev)
 	case FCOE_CTLR_UNUSED:
 	default:
 		return -ENOTSUPP;
-	};
+	}
 }
 
 /**
@@ -2504,6 +2501,7 @@ static int __init fcoe_init(void)
 
 out_free:
 	mutex_unlock(&fcoe_config_mutex);
+	fcoe_transport_detach(&fcoe_sw_transport);
 out_destroy:
 	destroy_workqueue(fcoe_wq);
 	return rc;
@@ -2772,7 +2770,7 @@ static int fcoe_vport_disable(struct fc_vport *vport, bool disable)
 }
 
 /**
- * fcoe_vport_set_symbolic_name() - append vport string to symbolic name
+ * fcoe_set_vport_symbolic_name() - append vport string to symbolic name
  * @vport: fc_vport with a new symbolic name string
  *
  * After generating a new symbolic name string, a new RSPN_ID request is

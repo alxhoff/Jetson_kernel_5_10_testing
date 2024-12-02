@@ -153,7 +153,7 @@ static const struct drm_display_mode jh057n00900_mode = {
 	.height_mm   = 130,
 };
 
-struct st7703_panel_desc jh057n00900_panel_desc = {
+static const struct st7703_panel_desc jh057n00900_panel_desc = {
 	.mode = &jh057n00900_mode,
 	.lanes = 4,
 	.mode_flags = MIPI_DSI_MODE_VIDEO |
@@ -428,29 +428,30 @@ static int st7703_prepare(struct drm_panel *panel)
 		return 0;
 
 	dev_dbg(ctx->dev, "Resetting the panel\n");
-	ret = regulator_enable(ctx->vcc);
-	if (ret < 0) {
-		dev_err(ctx->dev, "Failed to enable vcc supply: %d\n", ret);
-		return ret;
-	}
+	gpiod_set_value_cansleep(ctx->reset_gpio, 1);
+
 	ret = regulator_enable(ctx->iovcc);
 	if (ret < 0) {
 		dev_err(ctx->dev, "Failed to enable iovcc supply: %d\n", ret);
-		goto disable_vcc;
+		return ret;
 	}
 
-	gpiod_set_value_cansleep(ctx->reset_gpio, 1);
-	usleep_range(20, 40);
+	ret = regulator_enable(ctx->vcc);
+	if (ret < 0) {
+		dev_err(ctx->dev, "Failed to enable vcc supply: %d\n", ret);
+		regulator_disable(ctx->iovcc);
+		return ret;
+	}
+
+	/* Give power supplies time to stabilize before deasserting reset. */
+	usleep_range(10000, 20000);
+
 	gpiod_set_value_cansleep(ctx->reset_gpio, 0);
-	msleep(20);
+	usleep_range(15000, 20000);
 
 	ctx->prepared = true;
 
 	return 0;
-
-disable_vcc:
-	regulator_disable(ctx->vcc);
-	return ret;
 }
 
 static int st7703_get_modes(struct drm_panel *panel,
@@ -530,10 +531,8 @@ static int st7703_probe(struct mipi_dsi_device *dsi)
 		return -ENOMEM;
 
 	ctx->reset_gpio = devm_gpiod_get(dev, "reset", GPIOD_OUT_LOW);
-	if (IS_ERR(ctx->reset_gpio)) {
-		dev_err(dev, "cannot get reset gpio\n");
-		return PTR_ERR(ctx->reset_gpio);
-	}
+	if (IS_ERR(ctx->reset_gpio))
+		return dev_err_probe(dev, PTR_ERR(ctx->reset_gpio), "Failed to get reset gpio\n");
 
 	mipi_dsi_set_drvdata(dsi, ctx);
 
@@ -545,19 +544,13 @@ static int st7703_probe(struct mipi_dsi_device *dsi)
 	dsi->lanes = ctx->desc->lanes;
 
 	ctx->vcc = devm_regulator_get(dev, "vcc");
-	if (IS_ERR(ctx->vcc)) {
-		ret = PTR_ERR(ctx->vcc);
-		if (ret != -EPROBE_DEFER)
-			dev_err(dev, "Failed to request vcc regulator: %d\n", ret);
-		return ret;
-	}
+	if (IS_ERR(ctx->vcc))
+		return dev_err_probe(dev, PTR_ERR(ctx->vcc), "Failed to request vcc regulator\n");
+
 	ctx->iovcc = devm_regulator_get(dev, "iovcc");
-	if (IS_ERR(ctx->iovcc)) {
-		ret = PTR_ERR(ctx->iovcc);
-		if (ret != -EPROBE_DEFER)
-			dev_err(dev, "Failed to request iovcc regulator: %d\n", ret);
-		return ret;
-	}
+	if (IS_ERR(ctx->iovcc))
+		return dev_err_probe(dev, PTR_ERR(ctx->iovcc),
+				     "Failed to request iovcc regulator\n");
 
 	drm_panel_init(&ctx->panel, dev, &st7703_drm_funcs,
 		       DRM_MODE_CONNECTOR_DSI);

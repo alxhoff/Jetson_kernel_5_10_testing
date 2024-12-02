@@ -239,7 +239,8 @@ static int snd_pcm_ioctl_hw_params_compat(struct snd_pcm_substream *substream,
 	struct snd_pcm_runtime *runtime;
 	int err;
 
-	if (! (runtime = substream->runtime))
+	runtime = substream->runtime;
+	if (!runtime)
 		return -ENOTTY;
 
 	data = kmalloc(sizeof(*data), GFP_KERNEL);
@@ -252,10 +253,14 @@ static int snd_pcm_ioctl_hw_params_compat(struct snd_pcm_substream *substream,
 		goto error;
 	}
 
-	if (refine)
+	if (refine) {
 		err = snd_pcm_hw_refine(substream, data);
-	else
+		if (err < 0)
+			goto error;
+		err = fixup_unreferenced_params(substream, data);
+	} else {
 		err = snd_pcm_hw_params(substream, data);
+	}
 	if (err < 0)
 		goto error;
 	if (copy_to_user(data32, data, sizeof(*data32)) ||
@@ -343,7 +348,8 @@ static int snd_pcm_ioctl_xfern_compat(struct snd_pcm_substream *substream,
 	if (substream->runtime->status->state == SNDRV_PCM_STATE_OPEN)
 		return -EBADFD;
 
-	if ((ch = substream->runtime->channels) > 128)
+	ch = substream->runtime->channels;
+	if (ch > 128)
 		return -EINVAL;
 	if (get_user(buf, &data32->bufs) ||
 	    get_user(frames, &data32->frames))

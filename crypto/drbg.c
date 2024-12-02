@@ -98,6 +98,7 @@
  */
 
 #include <crypto/drbg.h>
+#include <crypto/internal/cipher.h>
 #include <linux/kernel.h>
 
 /***************************************************************
@@ -177,16 +178,16 @@ static const struct drbg_core drbg_cores[] = {
 		.backend_cra_name = "hmac(sha384)",
 	}, {
 		.flags = DRBG_HMAC | DRBG_STRENGTH256,
-		.statelen = 64, /* block length of cipher */
-		.blocklen_bytes = 64,
-		.cra_name = "hmac_sha512",
-		.backend_cra_name = "hmac(sha512)",
-	}, {
-		.flags = DRBG_HMAC | DRBG_STRENGTH256,
 		.statelen = 32, /* block length of cipher */
 		.blocklen_bytes = 32,
 		.cra_name = "hmac_sha256",
 		.backend_cra_name = "hmac(sha256)",
+	}, {
+		.flags = DRBG_HMAC | DRBG_STRENGTH256,
+		.statelen = 64, /* block length of cipher */
+		.blocklen_bytes = 64,
+		.cra_name = "hmac_sha512",
+		.backend_cra_name = "hmac(sha512)",
 	},
 #endif /* CONFIG_CRYPTO_DRBG_HMAC */
 };
@@ -1515,6 +1516,14 @@ static int drbg_prepare_hrng(struct drbg_state *drbg)
 		return 0;
 
 	drbg->jent = crypto_alloc_rng("jitterentropy_rng", 0, 0);
+	if (IS_ERR(drbg->jent)) {
+		const int err = PTR_ERR(drbg->jent);
+
+		drbg->jent = NULL;
+		if (fips_enabled)
+			return err;
+		pr_info("DRBG: Continuing without Jitter RNG\n");
+	}
 
 	return 0;
 }
@@ -1569,14 +1578,6 @@ static int drbg_instantiate(struct drbg_state *drbg, struct drbg_string *pers,
 		ret = drbg_prepare_hrng(drbg);
 		if (ret)
 			goto free_everything;
-
-		if (IS_ERR(drbg->jent)) {
-			ret = PTR_ERR(drbg->jent);
-			drbg->jent = NULL;
-			if (fips_enabled || ret != -ENOENT)
-				goto free_everything;
-			pr_info("DRBG: Continuing without Jitter RNG\n");
-		}
 
 		reseed = false;
 	}
@@ -2138,3 +2139,4 @@ MODULE_DESCRIPTION("NIST SP800-90A Deterministic Random Bit Generator (DRBG) "
 		   CRYPTO_DRBG_HMAC_STRING
 		   CRYPTO_DRBG_CTR_STRING);
 MODULE_ALIAS_CRYPTO("stdrng");
+MODULE_IMPORT_NS(CRYPTO_INTERNAL);

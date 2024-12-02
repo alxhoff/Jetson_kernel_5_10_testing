@@ -2,6 +2,7 @@
  * Copyright (c) 2005 Topspin Communications.  All rights reserved.
  * Copyright (c) 2005 Cisco Systems.  All rights reserved.
  * Copyright (c) 2005 Mellanox Technologies. All rights reserved.
+ * Copyright (c) 2020 Intel Corporation. All rights reserved.
  *
  * This software is available to you under a choice of one of two
  * licenses.  You may choose to be licensed under the terms of the GNU
@@ -44,21 +45,23 @@
 
 #include "uverbs.h"
 
+#include "ib_peer_mem.h"
+
 static void __ib_umem_release(struct ib_device *dev, struct ib_umem *umem, int dirty)
 {
-	struct sg_page_iter sg_iter;
-	struct page *page;
+	bool make_dirty = umem->writable && dirty;
+	struct scatterlist *sg;
+	unsigned int i;
 
-	if (umem->nmap > 0)
-		ib_dma_unmap_sg(dev, umem->sg_head.sgl, umem->sg_nents,
-				DMA_BIDIRECTIONAL);
+	if (dirty)
+		ib_dma_unmap_sgtable_attrs(dev, &umem->sgt_append.sgt,
+					   DMA_BIDIRECTIONAL, 0);
 
-	for_each_sg_page(umem->sg_head.sgl, &sg_iter, umem->sg_nents, 0) {
-		page = sg_page_iter_page(&sg_iter);
-		unpin_user_pages_dirty_lock(&page, 1, umem->writable && dirty);
-	}
+	for_each_sgtable_sg(&umem->sgt_append.sgt, sg, i)
+		unpin_user_page_range_dirty_lock(sg_page(sg),
+			DIV_ROUND_UP(sg->length, PAGE_SIZE), make_dirty);
 
-	sg_free_table(&umem->sg_head);
+	sg_free_append_table(&umem->sgt_append);
 }
 
 /**
@@ -84,17 +87,17 @@ unsigned long ib_umem_find_best_pgsz(struct ib_umem *umem,
 	dma_addr_t mask;
 	int i;
 
-	/* rdma_for_each_block() has a bug if the page size is smaller than the
-	 * page size used to build the umem. For now prevent smaller page sizes
-	 * from being returned.
-	 */
-	pgsz_bitmap &= GENMASK(BITS_PER_LONG - 1, PAGE_SHIFT);
-
-	/* At minimum, drivers must support PAGE_SIZE or smaller */
-	if (WARN_ON(!(pgsz_bitmap & GENMASK(PAGE_SHIFT, 0))))
-		return 0;
-
 	umem->iova = va = virt;
+
+	if (umem->is_odp) {
+		unsigned int page_size = BIT(to_ib_umem_odp(umem)->page_shift);
+
+		/* ODP must always be self consistent. */
+		if (!(pgsz_bitmap & page_size))
+			return 0;
+		return page_size;
+	}
+
 	/* The best result is the smallest page size that results in the minimum
 	 * number of required pages. Compute the largest page size that could
 	 * work based on VA address bits that don't change.
@@ -105,7 +108,7 @@ unsigned long ib_umem_find_best_pgsz(struct ib_umem *umem,
 	/* offset into first SGL */
 	pgoff = umem->address & ~PAGE_MASK;
 
-	for_each_sg(umem->sg_head.sgl, sg, umem->nmap, i) {
+	for_each_sgtable_dma_sg(&umem->sgt_append.sgt, sg, i) {
 		/* Walk SGL and reduce max page size if VA/PA bits differ
 		 * for any address.
 		 */
@@ -115,7 +118,7 @@ unsigned long ib_umem_find_best_pgsz(struct ib_umem *umem,
 		 * the maximum possible page size as the low bits of the iova
 		 * must be zero when starting the next chunk.
 		 */
-		if (i != (umem->nmap - 1))
+		if (i != (umem->sgt_append.sgt.nents - 1))
 			mask |= va;
 		pgoff = 0;
 	}
@@ -131,15 +134,17 @@ unsigned long ib_umem_find_best_pgsz(struct ib_umem *umem,
 EXPORT_SYMBOL(ib_umem_find_best_pgsz);
 
 /**
- * ib_umem_get - Pin and DMA map userspace memory.
+ * __ib_umem_get - Pin and DMA map userspace memory.
  *
  * @device: IB device to connect UMEM
  * @addr: userspace virtual address to start at
  * @size: length of region to pin
  * @access: IB_ACCESS_xxx flags for memory being pinned
+ * @peer_mem_flags: IB_PEER_MEM_xxx flags for memory being used
  */
-struct ib_umem *ib_umem_get(struct ib_device *device, unsigned long addr,
-			    size_t size, int access)
+static struct ib_umem *__ib_umem_get(struct ib_device *device,
+				    unsigned long addr, size_t size, int access,
+				    unsigned long peer_mem_flags)
 {
 	struct ib_umem *umem;
 	struct page **page_list;
@@ -149,8 +154,7 @@ struct ib_umem *ib_umem_get(struct ib_device *device, unsigned long addr,
 	unsigned long dma_attr = 0;
 	struct mm_struct *mm;
 	unsigned long npages;
-	int ret;
-	struct scatterlist *sg = NULL;
+	int pinned, ret;
 	unsigned int gup_flags = FOLL_WRITE;
 
 	/*
@@ -210,24 +214,24 @@ struct ib_umem *ib_umem_get(struct ib_device *device, unsigned long addr,
 
 	while (npages) {
 		cond_resched();
-		ret = pin_user_pages_fast(cur_base,
+		pinned = pin_user_pages_fast(cur_base,
 					  min_t(unsigned long, npages,
 						PAGE_SIZE /
 						sizeof(struct page *)),
 					  gup_flags | FOLL_LONGTERM, page_list);
-		if (ret < 0)
+		if (pinned < 0) {
+			ret = pinned;
 			goto umem_release;
+		}
 
-		cur_base += ret * PAGE_SIZE;
-		npages -= ret;
-		sg = __sg_alloc_table_from_pages(&umem->sg_head, page_list, ret,
-				0, ret << PAGE_SHIFT,
-				ib_dma_max_seg_size(device), sg, npages,
-				GFP_KERNEL);
-		umem->sg_nents = umem->sg_head.nents;
-		if (IS_ERR(sg)) {
-			unpin_user_pages_dirty_lock(page_list, ret, 0);
-			ret = PTR_ERR(sg);
+		cur_base += pinned * PAGE_SIZE;
+		npages -= pinned;
+		ret = sg_alloc_append_table_from_pages(
+			&umem->sgt_append, page_list, pinned, 0,
+			pinned << PAGE_SHIFT, ib_dma_max_seg_size(device),
+			npages, GFP_KERNEL);
+		if (ret) {
+			unpin_user_pages_dirty_lock(page_list, pinned, 0);
 			goto umem_release;
 		}
 	}
@@ -235,20 +239,34 @@ struct ib_umem *ib_umem_get(struct ib_device *device, unsigned long addr,
 	if (access & IB_ACCESS_RELAXED_ORDERING)
 		dma_attr |= DMA_ATTR_WEAK_ORDERING;
 
-	umem->nmap =
-		ib_dma_map_sg_attrs(device, umem->sg_head.sgl, umem->sg_nents,
-				    DMA_BIDIRECTIONAL, dma_attr);
-
-	if (!umem->nmap) {
-		ret = -ENOMEM;
+	ret = ib_dma_map_sgtable_attrs(device, &umem->sgt_append.sgt,
+				       DMA_BIDIRECTIONAL, dma_attr);
+	if (ret)
 		goto umem_release;
-	}
-
-	ret = 0;
 	goto out;
 
 umem_release:
 	__ib_umem_release(device, umem, 0);
+
+	/*
+	 * If the address belongs to peer memory client, then the first
+	 * call to get_user_pages will fail. In this case, try to get
+	 * these pages from the peers.
+	 */
+	//FIXME: this placement is horrible
+	if (ret < 0 && peer_mem_flags & IB_PEER_MEM_ALLOW) {
+		struct ib_umem *new_umem;
+
+		new_umem = ib_peer_umem_get(umem, ret, peer_mem_flags);
+		if (IS_ERR(new_umem)) {
+			ret = PTR_ERR(new_umem);
+			goto vma;
+		}
+		umem = new_umem;
+		ret = 0;
+		goto out;
+	}
+vma:
 	atomic64_sub(ib_umem_num_pages(umem), &mm->pinned_vm);
 out:
 	free_page((unsigned long) page_list);
@@ -259,7 +277,22 @@ umem_kfree:
 	}
 	return ret ? ERR_PTR(ret) : umem;
 }
+
+struct ib_umem *ib_umem_get(struct ib_device *device, unsigned long addr,
+			    size_t size, int access)
+{
+	return __ib_umem_get(device, addr, size, access, 0);
+}
 EXPORT_SYMBOL(ib_umem_get);
+
+struct ib_umem *ib_umem_get_peer(struct ib_device *device, unsigned long addr,
+				 size_t size, int access,
+				 unsigned long peer_mem_flags)
+{
+	return __ib_umem_get(device, addr, size, access,
+			     IB_PEER_MEM_ALLOW | peer_mem_flags);
+}
+EXPORT_SYMBOL(ib_umem_get_peer);
 
 /**
  * ib_umem_release - release memory pinned with ib_umem_get
@@ -269,9 +302,13 @@ void ib_umem_release(struct ib_umem *umem)
 {
 	if (!umem)
 		return;
+	if (umem->is_dmabuf)
+		return ib_umem_dmabuf_release(to_ib_umem_dmabuf(umem));
 	if (umem->is_odp)
 		return ib_umem_odp_release(to_ib_umem_odp(umem));
 
+	if (umem->is_peer)
+		return ib_peer_umem_release(umem);
 	__ib_umem_release(umem->ibdev, umem, 1);
 
 	atomic64_sub(ib_umem_num_pages(umem), &umem->owning_mm->pinned_vm);
@@ -297,12 +334,13 @@ int ib_umem_copy_from(void *dst, struct ib_umem *umem, size_t offset,
 	int ret;
 
 	if (offset > umem->length || length > umem->length - offset) {
-		pr_err("ib_umem_copy_from not in range. offset: %zd umem length: %zd end: %zd\n",
-		       offset, umem->length, end);
+		pr_err("%s not in range. offset: %zd umem length: %zd end: %zd\n",
+		       __func__, offset, umem->length, end);
 		return -EINVAL;
 	}
 
-	ret = sg_pcopy_to_buffer(umem->sg_head.sgl, umem->sg_nents, dst, length,
+	ret = sg_pcopy_to_buffer(umem->sgt_append.sgt.sgl,
+				 umem->sgt_append.sgt.orig_nents, dst, length,
 				 offset + ib_umem_offset(umem));
 
 	if (ret < 0)

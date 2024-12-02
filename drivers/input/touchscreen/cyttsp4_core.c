@@ -30,6 +30,20 @@
 
 #define CY_CORE_STARTUP_RETRY_COUNT		3
 
+static const char * const cyttsp4_tch_abs_string[] = {
+	[CY_TCH_X]	= "X",
+	[CY_TCH_Y]	= "Y",
+	[CY_TCH_P]	= "P",
+	[CY_TCH_T]	= "T",
+	[CY_TCH_E]	= "E",
+	[CY_TCH_O]	= "O",
+	[CY_TCH_W]	= "W",
+	[CY_TCH_MAJ]	= "MAJ",
+	[CY_TCH_MIN]	= "MIN",
+	[CY_TCH_OR]	= "OR",
+	[CY_TCH_NUM_ABS] = "INVALID"
+};
+
 static const u8 ldr_exit[] = {
 	0xFF, 0x01, 0x3B, 0x00, 0x00, 0x4F, 0x6D, 0x17
 };
@@ -1249,9 +1263,8 @@ static void cyttsp4_stop_wd_timer(struct cyttsp4 *cd)
 	 * Ensure we wait until the watchdog timer
 	 * running on a different CPU finishes
 	 */
-	del_timer_sync(&cd->watchdog_timer);
+	timer_shutdown_sync(&cd->watchdog_timer);
 	cancel_work_sync(&cd->watchdog_work);
-	del_timer_sync(&cd->watchdog_timer);
 }
 
 static void cyttsp4_watchdog_timer(struct timer_list *t)

@@ -1,7 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-only
 /*
  * Copyright (C) 2002 ARM Limited, All Rights Reserved.
- * Copyright (C) 2018-2020, NVIDIA CORPORATION.  All rights reserved.
  */
 
 #include <linux/interrupt.h>
@@ -13,24 +12,17 @@
 
 static DEFINE_RAW_SPINLOCK(irq_controller_lock);
 
-static const struct gic_kvm_info *gic_kvm_info;
-
-const struct gic_kvm_info *gic_get_kvm_info(void)
-{
-	return gic_kvm_info;
-}
-
-void gic_set_kvm_info(const struct gic_kvm_info *info)
-{
-	BUG_ON(gic_kvm_info != NULL);
-	gic_kvm_info = info;
-}
-
 void gic_enable_of_quirks(const struct device_node *np,
 			  const struct gic_quirk *quirks, void *data)
 {
 	for (; quirks->desc; quirks++) {
-		if (!of_device_is_compatible(np, quirks->compatible))
+		if (!quirks->compatible && !quirks->property)
+			continue;
+		if (quirks->compatible &&
+		    !of_device_is_compatible(np, quirks->compatible))
+			continue;
+		if (quirks->property &&
+		    !of_property_read_bool(np, quirks->property))
 			continue;
 		if (quirks->init(data))
 			pr_info("GIC: enabling workaround for %s\n",
@@ -42,7 +34,7 @@ void gic_enable_quirks(u32 iidr, const struct gic_quirk *quirks,
 		void *data)
 {
 	for (; quirks->desc; quirks++) {
-		if (quirks->compatible)
+		if (quirks->compatible || quirks->property)
 			continue;
 		if (quirks->iidr != (quirks->mask & iidr))
 			continue;
@@ -113,10 +105,9 @@ void gic_dist_config(void __iomem *base, int gic_irqs,
 	/*
 	 * Set priority on all global interrupts.
 	 */
-#ifndef CONFIG_MINIMAL_GIC_INIT
 	for (i = 32; i < gic_irqs; i += 4)
 		writel_relaxed(GICD_INT_DEF_PRI_X4, base + GIC_DIST_PRI + i);
-#endif
+
 	/*
 	 * Deactivate and disable all SPIs. Leave the PPI and SGIs
 	 * alone as they are in the redistributor registers on GICv3.

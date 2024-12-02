@@ -185,7 +185,8 @@ static void smk_netlabel_audit_set(struct netlbl_audit *nap)
 
 	nap->loginuid = audit_get_loginuid(current);
 	nap->sessionid = audit_get_sessionid(current);
-	nap->secid = skp->smk_secid;
+	lsmblob_init(&nap->lsmdata, 0);
+	nap->lsmdata.secid[smack_lsmid.slot] = skp->smk_secid;
 }
 
 /*
@@ -380,7 +381,7 @@ static int smk_parse_rule(const char *data, struct smack_parsed_rule *rule,
  * @data: string to be parsed, null terminated
  * @rule: Will be filled with Smack parsed rule
  * @import: if non-zero, import labels
- * @tokens: numer of substrings expected in data
+ * @tokens: number of substrings expected in data
  *
  * Returns number of processed bytes on success, -ERRNO on failure.
  */
@@ -895,7 +896,7 @@ static ssize_t smk_set_cipso(struct file *file, const char __user *buf,
 	}
 
 	ret = sscanf(rule, "%d", &catlen);
-	if (ret != 1 || catlen > SMACK_CIPSO_MAXCATNUM)
+	if (ret != 1 || catlen < 0 || catlen > SMACK_CIPSO_MAXCATNUM)
 		goto out;
 
 	if (format == SMK_FIXED24_FMT &&
@@ -1143,6 +1144,7 @@ static void smk_net4addr_insert(struct smk_net4addr *new)
 static ssize_t smk_write_net4addr(struct file *file, const char __user *buf,
 				size_t count, loff_t *ppos)
 {
+	struct lsmblob lsmblob;
 	struct smk_net4addr *snp;
 	struct sockaddr_in newname;
 	char *smack;
@@ -1274,10 +1276,13 @@ static ssize_t smk_write_net4addr(struct file *file, const char __user *buf,
 	 * this host so that incoming packets get labeled.
 	 * but only if we didn't get the special CIPSO option
 	 */
-	if (rc == 0 && skp != NULL)
+	if (rc == 0 && skp != NULL) {
+		lsmblob_init(&lsmblob, 0);
+		lsmblob.secid[smack_lsmid.slot] = snp->smk_label->smk_secid;
 		rc = netlbl_cfg_unlbl_static_add(&init_net, NULL,
-			&snp->smk_host, &snp->smk_mask, PF_INET,
-			snp->smk_label->smk_secid, &audit_info);
+			&snp->smk_host, &snp->smk_mask, PF_INET, &lsmblob,
+			&audit_info);
+	}
 
 	if (rc == 0)
 		rc = count;
@@ -1949,7 +1954,7 @@ static void smk_list_swap_rcu(struct list_head *public,
  * smk_parse_label_list - parse list of Smack labels, separated by spaces
  *
  * @data: the string to parse
- * @private: destination list
+ * @list: destination list
  *
  * Returns zero on success or error code, as appropriate
  */
@@ -1980,7 +1985,7 @@ static int smk_parse_label_list(char *data, struct list_head *list)
 
 /**
  * smk_destroy_label_list - destroy a list of smack_known_list_elem
- * @head: header pointer of the list to destroy
+ * @list: header pointer of the list to destroy
  */
 void smk_destroy_label_list(struct list_head *list)
 {
@@ -2144,7 +2149,7 @@ static const struct file_operations smk_unconfined_ops = {
  * smk_read_logging - read() for /smack/logging
  * @filp: file pointer, not actually used
  * @buf: where to put the result
- * @cn: maximum to send along
+ * @count: maximum to send along
  * @ppos: where to start
  *
  * Returns number of bytes read or error code, as appropriate
@@ -2285,6 +2290,7 @@ static const struct file_operations smk_load_self_ops = {
  * @buf: data from user space
  * @count: bytes sent
  * @ppos: where to start - must be 0
+ * @format: /smack/load or /smack/load2 or /smack/change-rule format.
  */
 static ssize_t smk_user_access(struct file *file, const char __user *buf,
 				size_t count, loff_t *ppos, int format)

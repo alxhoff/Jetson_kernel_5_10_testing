@@ -14,7 +14,7 @@
 #include <linux/tee_drv.h>
 #include <linux/uaccess.h>
 #include <crypto/hash.h>
-#include <crypto/sha.h>
+#include <crypto/sha1.h>
 #include "tee_private.h"
 
 #define TEE_NUM_DEVICES	32
@@ -334,6 +334,9 @@ tee_ioctl_shm_register(struct tee_context *ctx,
 	if (data.flags)
 		return -EINVAL;
 
+	if (!access_ok((void __user *)(unsigned long)data.addr, data.length))
+		return -EFAULT;
+
 	shm = tee_shm_register(ctx, data.addr, data.length,
 			       TEE_SHM_DMA_BUF | TEE_SHM_USER_MAPPED);
 	if (IS_ERR(shm))
@@ -456,6 +459,7 @@ static int params_to_user(struct tee_ioctl_param __user *uparams,
 		case TEE_IOCTL_PARAM_ATTR_TYPE_MEMREF_INOUT:
 			if (put_user((u64)p->u.memref.size, &up->b))
 				return -EFAULT;
+			break;
 		default:
 			break;
 		}

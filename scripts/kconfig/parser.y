@@ -12,6 +12,7 @@
 #include <stdbool.h>
 
 #include "lkc.h"
+#include "internal.h"
 
 #define printd(mask, fmt...) if (cdebug & (mask)) printf(fmt)
 
@@ -28,7 +29,7 @@ static bool zconf_endtoken(const char *tokenname,
 
 struct symbol *symbol_hash[SYMBOL_HASHSIZE];
 
-static struct menu *current_menu, *current_entry;
+struct menu *current_menu, *current_entry;
 
 %}
 
@@ -45,9 +46,6 @@ static struct menu *current_menu, *current_entry;
 %token <string> T_HELPTEXT
 %token <string> T_WORD
 %token <string> T_WORD_QUOTE
-%token T_ALLNOCONFIG_Y
-%token T_APPEND_CHOICE
-%token T_APPEND_MENU
 %token T_BOOL
 %token T_CHOICE
 %token T_CLOSE_PAREN
@@ -55,7 +53,6 @@ static struct menu *current_menu, *current_entry;
 %token T_COMMENT
 %token T_CONFIG
 %token T_DEFAULT
-%token T_DEFCONFIG_LIST
 %token T_DEF_BOOL
 %token T_DEF_TRISTATE
 %token T_DEPENDS
@@ -73,7 +70,6 @@ static struct menu *current_menu, *current_entry;
 %token T_MODULES
 %token T_ON
 %token T_OPEN_PAREN
-%token T_OPTION
 %token T_OPTIONAL
 %token T_PLUS_EQUAL
 %token T_PROMPT
@@ -98,7 +94,7 @@ static struct menu *current_menu, *current_entry;
 %type <expr> expr
 %type <expr> if_expr
 %type <string> end
-%type <menu> if_entry menu_entry append_menu_entry choice_entry append_choice_entry
+%type <menu> if_entry menu_entry choice_entry
 %type <string> word_opt assign_val
 %type <flavor> assign_op
 
@@ -107,7 +103,7 @@ static struct menu *current_menu, *current_entry;
 		$$->file->name, $$->lineno);
 	if (current_menu == $$)
 		menu_end_menu();
-} if_entry menu_entry append_menu_entry choice_entry append_choice_entry
+} if_entry menu_entry choice_entry
 
 %%
 input: mainmenu_stmt stmt_list | stmt_list;
@@ -220,19 +216,12 @@ config_option: T_RANGE symbol symbol if_expr T_EOL
 	printd(DEBUG_PARSE, "%s:%d:range\n", zconf_curname(), zconf_lineno());
 };
 
-config_option: T_OPTION T_MODULES T_EOL
+config_option: T_MODULES T_EOL
 {
-	menu_add_option_modules();
-};
-
-config_option: T_OPTION T_DEFCONFIG_LIST T_EOL
-{
-	menu_add_option_defconfig_list();
-};
-
-config_option: T_OPTION T_ALLNOCONFIG_Y T_EOL
-{
-	menu_add_option_allnoconfig_y();
+	if (modules_sym)
+		zconf_error("symbol '%s' redefines option 'modules' already defined by symbol '%s'",
+			    current_entry->sym->name, modules_sym->name);
+	modules_sym = current_entry->sym;
 };
 
 /* choice entry */
@@ -252,12 +241,6 @@ choice_entry: choice choice_option_list
 	$$ = menu_add_menu();
 };
 
-append_choice_entry: T_APPEND_CHOICE T_WORD_QUOTE T_EOL
-{
-	printd(DEBUG_PARSE, "%s:%d:append_choice\n", zconf_curname(), zconf_lineno());
-	$$ = menu_append_choice($2);
-};
-
 choice_end: end
 {
 	if (zconf_endtoken($1, "choice")) {
@@ -266,9 +249,7 @@ choice_end: end
 	}
 };
 
-choice_stmt:
-	  choice_entry stmt_list_in_choice choice_end
-	| append_choice_entry stmt_list_in_choice choice_end
+choice_stmt: choice_entry stmt_list_in_choice choice_end
 ;
 
 choice_option_list:
@@ -357,12 +338,6 @@ menu_entry: menu menu_option_list
 	$$ = menu_add_menu();
 };
 
-append_menu_entry: T_APPEND_MENU T_WORD_QUOTE T_EOL
-{
-	printd(DEBUG_PARSE, "%s:%d:append_menu\n", zconf_curname(), zconf_lineno());
-	$$ = menu_append_entry($2);
-};
-
 menu_end: end
 {
 	if (zconf_endtoken($1, "menu")) {
@@ -371,9 +346,7 @@ menu_end: end
 	}
 };
 
-menu_stmt:
-	  menu_entry stmt_list menu_end
-	| append_menu_entry stmt_list menu_end
+menu_stmt: menu_entry stmt_list menu_end
 ;
 
 menu_option_list:
@@ -535,7 +508,7 @@ void conf_parse(const char *name)
 	}
 	if (yynerrs)
 		exit(1);
-	sym_set_change_count(1);
+	conf_set_changed(true);
 }
 
 static bool zconf_endtoken(const char *tokenname,
@@ -547,7 +520,7 @@ static bool zconf_endtoken(const char *tokenname,
 		yynerrs++;
 		return false;
 	}
-	if (strcmp(current_menu->file->logical_name, current_file->logical_name)) {
+	if (current_menu->file != current_file) {
 		zconf_error("'%s' in different file than '%s'",
 			    tokenname, expected_tokenname);
 		fprintf(stderr, "%s:%d: location of the '%s'\n",
@@ -741,5 +714,3 @@ void zconfdump(FILE *out)
 		}
 	}
 }
-
-#include "menu.c"

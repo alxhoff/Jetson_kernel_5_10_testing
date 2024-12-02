@@ -72,7 +72,10 @@
 
 #define REQ_SOCKET_ID			GENMASK(27, 24)
 
-#define FIREWALL_APERTURE_SIZE		0x10000
+#define CCPLEX_MSTRID			0x1
+#define FIREWALL_APERTURE_SZ		0x10000
+/* Write firewall check enable */
+#define WEN				0x20000
 
 enum tegra234_cbb_fabric_ids {
 	CBB_FAB_ID,
@@ -95,6 +98,8 @@ struct tegra234_cbb_fabric {
 	const char *name;
 	phys_addr_t off_mask_erd;
 	phys_addr_t firewall_base;
+	unsigned int firewall_ctl;
+	unsigned int firewall_wr_ctl;
 	const char * const *master_id;
 	unsigned int notifier_offset;
 	const struct tegra_cbb_error *errors;
@@ -132,33 +137,43 @@ static inline struct tegra234_cbb *to_tegra234_cbb(struct tegra_cbb *cbb)
 static LIST_HEAD(cbb_list);
 static DEFINE_SPINLOCK(cbb_lock);
 
-u32 tegra234_cbb_readl(unsigned long addr)
+static bool
+tegra234_cbb_write_access_allowed(struct platform_device *pdev, struct tegra234_cbb *cbb)
 {
-	unsigned long offset = (addr & 0x0FFFF);
-	struct tegra_cbb *cbb;
-	bool flag = 0;
-	u32 val = 0;
+	u32 val;
 
-	if (offset > FIREWALL_APERTURE_SIZE) {
-		pr_err("%s: wrong offset value\n", __func__);
-		return 0;
+	if (!cbb->fabric->firewall_base ||
+	    !cbb->fabric->firewall_ctl ||
+	    !cbb->fabric->firewall_wr_ctl) {
+		dev_info(&pdev->dev, "SoC data missing for firewall\n");
+		return false;
 	}
 
-	list_for_each_entry(cbb, &cbb_list, node) {
-		struct tegra234_cbb *priv = to_tegra234_cbb(cbb);
-
-		if (priv->fabric->firewall_base) {
-			val = readl(priv->regs + priv->fabric->firewall_base + offset);
-			flag = true;
-			break;
-		}
+	if ((cbb->fabric->firewall_ctl > FIREWALL_APERTURE_SZ) ||
+	    (cbb->fabric->firewall_wr_ctl > FIREWALL_APERTURE_SZ)) {
+		dev_err(&pdev->dev, "wrong firewall offset value\n");
+		return false;
 	}
-	if (!flag)
-		pr_err("%s: cbb fabric not initialized\n", __func__);
 
-	return val;
+	val = readl(cbb->regs + cbb->fabric->firewall_base + cbb->fabric->firewall_ctl);
+	/*
+	 * If the firewall check feature for allowing or blocking the
+	 * write accesses through the firewall of a fabric is disabled
+	 * then CCPLEX can write to the registers of that fabric.
+	 */
+	if (!(val & WEN))
+		return true;
+
+	/*
+	 * If the firewall check is enabled then check whether CCPLEX
+	 * has write access to the fabric's error notifier registers
+	 */
+	val = readl(cbb->regs + cbb->fabric->firewall_base + cbb->fabric->firewall_wr_ctl);
+	if (val & (BIT(CCPLEX_MSTRID)))
+		return true;
+
+	return false;
 }
-EXPORT_SYMBOL(tegra234_cbb_readl);
 
 static void tegra234_cbb_fault_enable(struct tegra_cbb *cbb)
 {
@@ -303,7 +318,13 @@ static void tegra234_cbb_print_error(struct seq_file *file, struct tegra234_cbb 
 		tegra_cbb_print_err(file, "\t  Multiple type of errors reported\n");
 
 	while (status) {
-		if ((status & 0x1) && (type < cbb->fabric->max_errors))
+		if (type >= cbb->fabric->max_errors) {
+			tegra_cbb_print_err(file, "\t  Wrong type index:%u, status:%u\n",
+					    type, status);
+			return;
+		}
+
+		if (status & 0x1)
 			tegra_cbb_print_err(file, "\t  Error Code\t\t: %s\n",
 					    cbb->fabric->errors[type].code);
 
@@ -314,7 +335,13 @@ static void tegra234_cbb_print_error(struct seq_file *file, struct tegra234_cbb 
 	type = 0;
 
 	while (overflow) {
-		if ((overflow & 0x1) && (type < cbb->fabric->max_errors))
+		if (type >= cbb->fabric->max_errors) {
+			tegra_cbb_print_err(file, "\t  Wrong type index:%u, overflow:%u\n",
+					    type, overflow);
+			return;
+		}
+
+		if (overflow & 0x1)
 			tegra_cbb_print_err(file, "\t  Overflow\t\t: Multiple %s\n",
 					    cbb->fabric->errors[type].code);
 
@@ -366,9 +393,11 @@ static void print_errlog_err(struct seq_file *file, struct tegra234_cbb *cbb)
 	access_type = FIELD_GET(FAB_EM_EL_ACCESSTYPE, cbb->mn_attr0);
 
 	tegra_cbb_print_err(file, "\n");
-	 if (cbb->type < cbb->fabric->max_errors)
+	if (cbb->type < cbb->fabric->max_errors)
 		tegra_cbb_print_err(file, "\t  Error Code\t\t: %s\n",
 				    cbb->fabric->errors[cbb->type].code);
+	else
+		tegra_cbb_print_err(file, "\t  Wrong type index:%u\n", cbb->type);
 
 	tegra_cbb_print_err(file, "\t  MASTER_ID\t\t: %s\n", cbb->fabric->master_id[mstr_id]);
 	tegra_cbb_print_err(file, "\t  Address\t\t: %#llx\n", cbb->access);
@@ -407,8 +436,10 @@ static void print_errlog_err(struct seq_file *file, struct tegra234_cbb *cbb)
 	if ((fab_id == PSC_FAB_ID) || (fab_id == FSI_FAB_ID))
 		return;
 
-	if ((cbb->type < cbb->fabric->max_errors) && (slave_id < cbb->fabric->max_slaves))
+	if (slave_id >= cbb->fabric->max_slaves) {
+		tegra_cbb_print_err(file, "\t  Invalid slave_id:%d\n", slave_id);
 		return;
+	}
 
 	if (!strcmp(cbb->fabric->errors[cbb->type].code, "TIMEOUT_ERR")) {
 		tegra234_lookup_slave_timeout(file, cbb, slave_id, fab_id);
@@ -566,7 +597,7 @@ static irqreturn_t tegra234_cbb_isr(int irq, void *data)
 			 */
 			if (priv->fabric->off_mask_erd) {
 				mstr_id =  FIELD_GET(USRBITS_MSTR_ID, priv->mn_user_bits);
-				if (mstr_id == 0x1)
+				if (mstr_id == CCPLEX_MSTRID)
 					is_inband_err = 1;
 			}
 		}
@@ -680,6 +711,9 @@ static const struct tegra234_cbb_fabric tegra234_aon_fabric = {
 	.errors = tegra234_cbb_errors,
 	.max_errors = ARRAY_SIZE(tegra234_cbb_errors),
 	.notifier_offset = 0x17000,
+	.firewall_base = 0x30000,
+	.firewall_ctl = 0x8d0,
+	.firewall_wr_ctl = 0x8c8,
 };
 
 static const struct tegra234_slave_lookup tegra234_bpmp_slave_map[] = {
@@ -698,6 +732,9 @@ static const struct tegra234_cbb_fabric tegra234_bpmp_fabric = {
 	.errors = tegra234_cbb_errors,
 	.max_errors = ARRAY_SIZE(tegra234_cbb_errors),
 	.notifier_offset = 0x19000,
+	.firewall_base = 0x30000,
+	.firewall_ctl = 0x8f0,
+	.firewall_wr_ctl = 0x8e8,
 };
 
 static const struct tegra234_slave_lookup tegra234_cbb_slave_map[] = {
@@ -774,46 +811,56 @@ static const struct tegra234_cbb_fabric tegra234_cbb_fabric = {
 	.notifier_offset = 0x60000,
 	.off_mask_erd = 0x3a004,
 	.firewall_base = 0x10000,
+	.firewall_ctl = 0x23f0,
+	.firewall_wr_ctl = 0x23e8,
 };
 
-static const struct tegra234_slave_lookup tegra234_dce_slave_map[] = {
+static const struct tegra234_slave_lookup tegra234_common_slave_map[] = {
 	{ "AXI2APB", 0x00000 },
 	{ "AST0",    0x15000 },
 	{ "AST1",    0x16000 },
 	{ "CBB",     0x17000 },
 	{ "RSVD",    0x00000 },
 	{ "CPU",     0x18000 },
-
 };
 
 static const struct tegra234_cbb_fabric tegra234_dce_fabric = {
 	.name = "dce-fabric",
 	.master_id = tegra234_master_id,
-	.slave_map = tegra234_dce_slave_map,
-	.max_slaves = ARRAY_SIZE(tegra234_dce_slave_map),
+	.slave_map = tegra234_common_slave_map,
+	.max_slaves = ARRAY_SIZE(tegra234_common_slave_map),
 	.errors = tegra234_cbb_errors,
 	.max_errors = ARRAY_SIZE(tegra234_cbb_errors),
 	.notifier_offset = 0x19000,
+	.firewall_base = 0x30000,
+	.firewall_ctl = 0x290,
+	.firewall_wr_ctl = 0x288,
 };
 
 static const struct tegra234_cbb_fabric tegra234_rce_fabric = {
 	.name = "rce-fabric",
 	.master_id = tegra234_master_id,
-	.slave_map = tegra234_dce_slave_map,
-	.max_slaves = ARRAY_SIZE(tegra234_dce_slave_map),
+	.slave_map = tegra234_common_slave_map,
+	.max_slaves = ARRAY_SIZE(tegra234_common_slave_map),
 	.errors = tegra234_cbb_errors,
 	.max_errors = ARRAY_SIZE(tegra234_cbb_errors),
 	.notifier_offset = 0x19000,
+	.firewall_base = 0x30000,
+	.firewall_ctl = 0x290,
+	.firewall_wr_ctl = 0x288,
 };
 
 static const struct tegra234_cbb_fabric tegra234_sce_fabric = {
 	.name = "sce-fabric",
 	.master_id = tegra234_master_id,
-	.slave_map = tegra234_dce_slave_map,
-	.max_slaves = ARRAY_SIZE(tegra234_dce_slave_map),
+	.slave_map = tegra234_common_slave_map,
+	.max_slaves = ARRAY_SIZE(tegra234_common_slave_map),
 	.errors = tegra234_cbb_errors,
 	.max_errors = ARRAY_SIZE(tegra234_cbb_errors),
 	.notifier_offset = 0x19000,
+	.firewall_base = 0x30000,
+	.firewall_ctl = 0x290,
+	.firewall_wr_ctl = 0x288,
 };
 
 static const char * const tegra241_master_id[] = {
@@ -997,6 +1044,8 @@ static const struct tegra234_cbb_fabric tegra241_cbb_fabric = {
 	.notifier_offset = 0x60000,
 	.off_mask_erd = 0x40004,
 	.firewall_base = 0x20000,
+	.firewall_ctl = 0x2370,
+	.firewall_wr_ctl = 0x2368,
 };
 
 static const struct tegra234_slave_lookup tegra241_bpmp_slave_map[] = {
@@ -1018,6 +1067,9 @@ static const struct tegra234_cbb_fabric tegra241_bpmp_fabric = {
 	.errors = tegra241_cbb_errors,
 	.max_errors = ARRAY_SIZE(tegra241_cbb_errors),
 	.notifier_offset = 0x19000,
+	.firewall_base = 0x30000,
+	.firewall_ctl = 0x8f0,
+	.firewall_wr_ctl = 0x8e8,
 };
 
 static const struct of_device_id tegra234_cbb_dt_ids[] = {
@@ -1102,6 +1154,15 @@ static int tegra234_cbb_probe(struct platform_device *pdev)
 
 	platform_set_drvdata(pdev, cbb);
 
+	/*
+	 * Don't enable error reporting for a Fabric if write to it's registers
+	 * is blocked by CBB firewall.
+	 */
+	if (!tegra234_cbb_write_access_allowed(pdev, cbb)) {
+		dev_info(&pdev->dev, "error reporting not enabled due to firewall\n");
+		return 0;
+	}
+
 	spin_lock_irqsave(&cbb_lock, flags);
 	list_add(&cbb->base.node, &cbb_list);
 	spin_unlock_irqrestore(&cbb_lock, flags);
@@ -1122,6 +1183,10 @@ static int __maybe_unused tegra234_cbb_resume_noirq(struct device *dev)
 {
 	struct tegra234_cbb *cbb = dev_get_drvdata(dev);
 
+	/* set ERD bit to mask SError and generate interrupt to report error */
+	if (cbb->fabric->off_mask_erd)
+		tegra234_cbb_mask_serror(cbb);
+
 	tegra234_cbb_error_enable(&cbb->base);
 
 	dev_dbg(dev, "%s resumed\n", cbb->fabric->name);
@@ -1137,7 +1202,6 @@ static struct platform_driver tegra234_cbb_driver = {
 	.probe = tegra234_cbb_probe,
 	.remove = tegra234_cbb_remove,
 	.driver = {
-		.owner = THIS_MODULE,
 		.name = "tegra234-cbb",
 		.of_match_table = tegra234_cbb_dt_ids,
 		.acpi_match_table = tegra241_cbb_acpi_ids,

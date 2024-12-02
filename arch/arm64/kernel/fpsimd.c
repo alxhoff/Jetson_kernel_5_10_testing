@@ -162,6 +162,8 @@ extern void __percpu *efi_sve_state;
 DEFINE_PER_CPU(bool, fpsimd_context_busy);
 EXPORT_PER_CPU_SYMBOL(fpsimd_context_busy);
 
+static void fpsimd_bind_task_to_cpu(void);
+
 static void __get_cpu_fpsimd_context(void)
 {
 	bool busy = __this_cpu_xchg(fpsimd_context_busy, true);
@@ -177,10 +179,19 @@ static void __get_cpu_fpsimd_context(void)
  *
  * The double-underscore version must only be called if you know the task
  * can't be preempted.
+ *
+ * On RT kernels local_bh_disable() is not sufficient because it only
+ * serializes soft interrupt related sections via a local lock, but stays
+ * preemptible. Disabling preemption is the right choice here as bottom
+ * half processing is always in thread context on RT kernels so it
+ * implicitly prevents bottom half processing as well.
  */
 static void get_cpu_fpsimd_context(void)
 {
-	preempt_disable();
+	if (!IS_ENABLED(CONFIG_PREEMPT_RT))
+		local_bh_disable();
+	else
+		preempt_disable();
 	__get_cpu_fpsimd_context();
 }
 
@@ -201,7 +212,10 @@ static void __put_cpu_fpsimd_context(void)
 static void put_cpu_fpsimd_context(void)
 {
 	__put_cpu_fpsimd_context();
-	preempt_enable();
+	if (!IS_ENABLED(CONFIG_PREEMPT_RT))
+		local_bh_enable();
+	else
+		preempt_enable();
 }
 
 static bool have_cpu_fpsimd_context(void)
@@ -285,7 +299,7 @@ static void task_fpsimd_load(void)
 	WARN_ON(!system_supports_fpsimd());
 	WARN_ON(!have_cpu_fpsimd_context());
 
-	if (system_supports_sve() && test_thread_flag(TIF_SVE))
+	if (IS_ENABLED(CONFIG_ARM64_SVE) && test_thread_flag(TIF_SVE))
 		sve_load_state(sve_pffr(&current->thread),
 			       &current->thread.uw.fpsimd_state.fpsr,
 			       sve_vq_from_vl(current->thread.sve_vl) - 1);
@@ -307,7 +321,8 @@ static void fpsimd_save(void)
 	WARN_ON(!have_cpu_fpsimd_context());
 
 	if (!test_thread_flag(TIF_FOREIGN_FPSTATE)) {
-		if (system_supports_sve() && test_thread_flag(TIF_SVE)) {
+		if (IS_ENABLED(CONFIG_ARM64_SVE) &&
+		    test_thread_flag(TIF_SVE)) {
 			if (WARN_ON(sve_get_vl() != last->sve_vl)) {
 				/*
 				 * Can't save the user regs, so current would
@@ -517,12 +532,6 @@ void sve_alloc(struct task_struct *task)
 	/* This is a small allocation (maximum ~8KB) and Should Not Fail. */
 	task->thread.sve_state =
 		kzalloc(sve_state_size(task), GFP_KERNEL);
-
-	/*
-	 * If future SVE revisions can have larger vectors though,
-	 * this may cease to be true:
-	 */
-	BUG_ON(!task->thread.sve_state);
 }
 
 
@@ -926,15 +935,14 @@ void fpsimd_release_task(struct task_struct *dead_task)
  * Trapped SVE access
  *
  * Storage is allocated for the full SVE state, the current FPSIMD
- * register contents are migrated across, and TIF_SVE is set so that
- * the SVE access trap will be disabled the next time this task
- * reaches ret_to_user.
+ * register contents are migrated across, and the access trap is
+ * disabled.
  *
  * TIF_SVE should be clear on entry: otherwise, fpsimd_restore_current_state()
  * would have disabled the SVE access trap for userspace during
  * ret_to_user, making an SVE access trap impossible in that case.
  */
-void do_sve_acc(unsigned int esr, struct pt_regs *regs)
+void do_sve_acc(unsigned long esr, struct pt_regs *regs)
 {
 	/* Even if we chose not to use SVE, the hardware could still trap: */
 	if (unlikely(!system_supports_sve()) || WARN_ON(is_compat_task())) {
@@ -943,17 +951,32 @@ void do_sve_acc(unsigned int esr, struct pt_regs *regs)
 	}
 
 	sve_alloc(current);
+	if (!current->thread.sve_state) {
+		force_sig(SIGKILL);
+		return;
+	}
 
 	get_cpu_fpsimd_context();
 
-	fpsimd_save();
-
-	/* Force ret_to_user to reload the registers: */
-	fpsimd_flush_task_state(current);
-
-	fpsimd_to_sve(current);
 	if (test_and_set_thread_flag(TIF_SVE))
 		WARN_ON(1); /* SVE access shouldn't have trapped */
+
+	/*
+	 * Convert the FPSIMD state to SVE, zeroing all the state that
+	 * is not shared with FPSIMD. If (as is likely) the current
+	 * state is live in the registers then do this there and
+	 * update our metadata for the current task including
+	 * disabling the trap, otherwise update our in-memory copy.
+	 */
+	if (!test_thread_flag(TIF_FOREIGN_FPSTATE)) {
+		unsigned long vq_minus_one =
+			sve_vq_from_vl(current->thread.sve_vl) - 1;
+		sve_set_vq(vq_minus_one);
+		sve_flush_live(vq_minus_one);
+		fpsimd_bind_task_to_cpu();
+	} else {
+		fpsimd_to_sve(current);
+	}
 
 	put_cpu_fpsimd_context();
 }
@@ -961,7 +984,7 @@ void do_sve_acc(unsigned int esr, struct pt_regs *regs)
 /*
  * Trapped FP/ASIMD access.
  */
-void do_fpsimd_acc(unsigned int esr, struct pt_regs *regs)
+void do_fpsimd_acc(unsigned long esr, struct pt_regs *regs)
 {
 	/* TODO: implement lazy context saving/restoring */
 	WARN_ON(1);
@@ -970,7 +993,7 @@ void do_fpsimd_acc(unsigned int esr, struct pt_regs *regs)
 /*
  * Raise a SIGFPE for the current process.
  */
-void do_fpsimd_exc(unsigned int esr, struct pt_regs *regs)
+void do_fpsimd_exc(unsigned long esr, struct pt_regs *regs)
 {
 	unsigned int si_code = FPE_FLTUNK;
 
@@ -1022,6 +1045,7 @@ void fpsimd_thread_switch(struct task_struct *next)
 void fpsimd_flush_thread(void)
 {
 	int vl, supported_vl;
+	void *sve_state = NULL;
 
 	if (!system_supports_fpsimd())
 		return;
@@ -1034,7 +1058,10 @@ void fpsimd_flush_thread(void)
 
 	if (system_supports_sve()) {
 		clear_thread_flag(TIF_SVE);
-		sve_free(current);
+
+		/* Defer kfree() while in atomic context */
+		sve_state = current->thread.sve_state;
+		current->thread.sve_state = NULL;
 
 		/*
 		 * Reset the task vector length as required.
@@ -1068,6 +1095,7 @@ void fpsimd_flush_thread(void)
 	}
 
 	put_cpu_fpsimd_context();
+	kfree(sve_state);
 }
 
 /*
@@ -1092,7 +1120,7 @@ void fpsimd_preserve_current_state(void)
 void fpsimd_signal_preserve_current_state(void)
 {
 	fpsimd_preserve_current_state();
-	if (system_supports_sve() && test_thread_flag(TIF_SVE))
+	if (test_thread_flag(TIF_SVE))
 		sve_to_fpsimd(current);
 }
 
@@ -1101,7 +1129,7 @@ void fpsimd_signal_preserve_current_state(void)
  * The caller must have ownership of the cpu FPSIMD context before calling
  * this function.
  */
-void fpsimd_bind_task_to_cpu(void)
+static void fpsimd_bind_task_to_cpu(void)
 {
 	struct fpsimd_last_state_struct *last =
 		this_cpu_ptr(&fpsimd_last_state);
@@ -1181,7 +1209,7 @@ void fpsimd_update_current_state(struct user_fpsimd_state const *state)
 	get_cpu_fpsimd_context();
 
 	current->thread.uw.fpsimd_state = *state;
-	if (system_supports_sve() && test_thread_flag(TIF_SVE))
+	if (test_thread_flag(TIF_SVE))
 		fpsimd_to_sve(current);
 
 	task_fpsimd_load();

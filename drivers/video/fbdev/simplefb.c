@@ -73,12 +73,18 @@ struct simplefb_par;
 static void simplefb_clocks_destroy(struct simplefb_par *par);
 static void simplefb_regulators_destroy(struct simplefb_par *par);
 
+/*
+ * fb_ops.fb_destroy is called by the last put_fb_info() call at the end
+ * of unregister_framebuffer() or fb_release(). Do any cleanup here.
+ */
 static void simplefb_destroy(struct fb_info *info)
 {
 	simplefb_regulators_destroy(info->par);
 	simplefb_clocks_destroy(info->par);
 	if (info->screen_base)
 		iounmap(info->screen_base);
+
+	framebuffer_release(info);
 }
 
 static const struct fb_ops simplefb_ops = {
@@ -435,6 +441,17 @@ static int simplefb_probe(struct platform_device *pdev)
 	struct simplefb_par *par;
 	struct resource *mem;
 
+	/*
+	 * Generic drivers must not be registered if a framebuffer exists.
+	 * If a native driver was probed, the display hardware was already
+	 * taken and attempting to use the system framebuffer is dangerous.
+	 */
+	if (num_registered_fb > 0) {
+		dev_err(&pdev->dev,
+			"simplefb: a framebuffer is already registered\n");
+		return -EINVAL;
+	}
+
 	if (fb_get_options("simplefb", NULL))
 		return -ENODEV;
 
@@ -510,9 +527,8 @@ static int simplefb_probe(struct platform_device *pdev)
 	simplefb_clocks_enable(par, pdev);
 	simplefb_regulators_enable(par, pdev);
 
-	dev_info(&pdev->dev, "framebuffer at 0x%lx, 0x%x bytes, mapped to 0x%p\n",
-			     info->fix.smem_start, info->fix.smem_len,
-			     info->screen_base);
+	dev_info(&pdev->dev, "framebuffer at 0x%lx, 0x%x bytes\n",
+			     info->fix.smem_start, info->fix.smem_len);
 	dev_info(&pdev->dev, "format=%s, mode=%dx%dx%d, linelength=%d\n",
 			     params.format->name,
 			     info->var.xres, info->var.yres,
@@ -545,8 +561,8 @@ static int simplefb_remove(struct platform_device *pdev)
 {
 	struct fb_info *info = platform_get_drvdata(pdev);
 
+	/* simplefb_destroy takes care of info cleanup */
 	unregister_framebuffer(info);
-	framebuffer_release(info);
 
 	return 0;
 }
@@ -566,26 +582,7 @@ static struct platform_driver simplefb_driver = {
 	.remove = simplefb_remove,
 };
 
-static int __init simplefb_init(void)
-{
-	int ret;
-	struct device_node *np;
-
-	ret = platform_driver_register(&simplefb_driver);
-	if (ret)
-		return ret;
-
-	if (IS_ENABLED(CONFIG_OF_ADDRESS) && of_chosen) {
-		for_each_child_of_node(of_chosen, np) {
-			if (of_device_is_compatible(np, "simple-framebuffer"))
-				of_platform_device_create(np, NULL, NULL);
-		}
-	}
-
-	return 0;
-}
-
-fs_initcall(simplefb_init);
+module_platform_driver(simplefb_driver);
 
 MODULE_AUTHOR("Stephen Warren <swarren@wwwdotorg.org>");
 MODULE_DESCRIPTION("Simple framebuffer driver");

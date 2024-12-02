@@ -271,7 +271,7 @@ static void optee_release(struct tee_context *ctx)
 	struct optee *optee = tee_get_drvdata(teedev);
 	struct tee_shm *shm;
 	struct optee_msg_arg *arg = NULL;
-	phys_addr_t parg = 0;
+	phys_addr_t parg;
 	struct optee_session *sess;
 	struct optee_session *sess_tmp;
 
@@ -789,7 +789,6 @@ module_platform_driver(optee_driver);
 
 MODULE_AUTHOR("Linaro");
 MODULE_DESCRIPTION("OP-TEE driver");
-MODULE_SUPPORTED_DEVICE("");
 MODULE_VERSION("1.0");
 MODULE_LICENSE("GPL v2");
 MODULE_ALIAS("platform:optee");

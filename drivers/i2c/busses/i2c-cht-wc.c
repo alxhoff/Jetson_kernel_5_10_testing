@@ -99,15 +99,8 @@ static irqreturn_t cht_wc_i2c_adap_thread_handler(int id, void *data)
 	 * interrupt handler as well, so running the client irq handler from
 	 * this thread will cause things to lock up.
 	 */
-	if (reg & CHT_WC_EXTCHGRIRQ_CLIENT_IRQ) {
-		/*
-		 * generic_handle_irq expects local IRQs to be disabled
-		 * as normally it is called from interrupt context.
-		 */
-		local_irq_disable();
-		generic_handle_irq(adap->client_irq);
-		local_irq_enable();
-	}
+	if (reg & CHT_WC_EXTCHGRIRQ_CLIENT_IRQ)
+		generic_handle_irq_safe(adap->client_irq);
 
 	return IRQ_HANDLED;
 }
@@ -280,6 +273,10 @@ static const struct property_entry bq24190_props[] = {
 	{ }
 };
 
+static const struct software_node bq24190_node = {
+	.properties = bq24190_props,
+};
+
 static struct regulator_consumer_supply fusb302_consumer = {
 	.supply = "vbus",
 	/* Must match fusb302 dev_name in intel_cht_int33fe.c */
@@ -308,7 +305,7 @@ static int cht_wc_i2c_adap_i2c_probe(struct platform_device *pdev)
 		.type = "bq24190",
 		.addr = 0x6b,
 		.dev_name = "bq24190",
-		.properties = bq24190_props,
+		.swnode = &bq24190_node,
 		.platform_data = &bq24190_pdata,
 	};
 	int ret, reg, irq;
@@ -350,8 +347,7 @@ static int cht_wc_i2c_adap_i2c_probe(struct platform_device *pdev)
 		return ret;
 
 	/* Alloc and register client IRQ */
-	adap->irq_domain = irq_domain_add_linear(pdev->dev.of_node, 1,
-						 &irq_domain_simple_ops, NULL);
+	adap->irq_domain = irq_domain_add_linear(NULL, 1, &irq_domain_simple_ops, NULL);
 	if (!adap->irq_domain)
 		return -ENOMEM;
 

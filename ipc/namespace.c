@@ -42,7 +42,7 @@ static struct ipc_namespace *create_ipc_ns(struct user_namespace *user_ns,
 		goto fail;
 
 	err = -ENOMEM;
-	ns = kzalloc(sizeof(struct ipc_namespace), GFP_KERNEL);
+	ns = kzalloc(sizeof(struct ipc_namespace), GFP_KERNEL_ACCOUNT);
 	if (ns == NULL)
 		goto fail_dec;
 
@@ -51,7 +51,7 @@ static struct ipc_namespace *create_ipc_ns(struct user_namespace *user_ns,
 		goto fail_free;
 	ns->ns.ops = &ipcns_operations;
 
-	refcount_set(&ns->count, 1);
+	refcount_set(&ns->ns.count, 1);
 	ns->user_ns = get_user_ns(user_ns);
 	ns->ucounts = ucounts;
 
@@ -164,7 +164,7 @@ static DECLARE_WORK(free_ipc_work, free_ipc);
  */
 void put_ipc_ns(struct ipc_namespace *ns)
 {
-	if (refcount_dec_and_lock(&ns->count, &mq_lock)) {
+	if (refcount_dec_and_lock(&ns->ns.count, &mq_lock)) {
 		mq_clear_sbinfo(ns);
 		spin_unlock(&mq_lock);
 
@@ -172,6 +172,23 @@ void put_ipc_ns(struct ipc_namespace *ns)
 			schedule_work(&free_ipc_work);
 	}
 }
+EXPORT_SYMBOL(put_ipc_ns);
+
+struct ipc_namespace *get_ipc_ns_exported(struct ipc_namespace *ns)
+{
+	return get_ipc_ns(ns);
+}
+EXPORT_SYMBOL(get_ipc_ns_exported);
+
+struct ipc_namespace *show_init_ipc_ns(void)
+{
+#if defined(CONFIG_IPC_NS)
+	return &init_ipc_ns;
+#else
+	return NULL;
+#endif
+}
+EXPORT_SYMBOL(show_init_ipc_ns);
 
 static inline struct ipc_namespace *to_ipc_ns(struct ns_common *ns)
 {

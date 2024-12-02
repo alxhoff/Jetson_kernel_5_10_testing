@@ -5,7 +5,7 @@
  * Author: Shaohui Xie <Shaohui.Xie@freescale.com>
  *
  * Copyright 2015 Freescale Semiconductor, Inc.
- * Copyright (c) 2021-2022, NVIDIA CORPORATION.  All rights reserved.
+ * Copyright (c) 2021-2023, NVIDIA CORPORATION.  All rights reserved.
  */
 
 #include <linux/kernel.h>
@@ -28,6 +28,9 @@
 #define PHY_ID_AQR405	0x03a1b4b0
 #define PHY_ID_AQR113C	0x31c31c12
 
+#define MDIO_AN_PAUSE                  BIT(10)
+#define MDIO_AN_ASYM_PAUSE             BIT(11)
+
 #define MDIO_PHYXS_VEND_IF_STATUS		0xe812
 #define MDIO_PHYXS_VEND_IF_STATUS_TYPE_MASK	GENMASK(7, 3)
 #define MDIO_PHYXS_VEND_IF_STATUS_TYPE_KR	0
@@ -42,6 +45,8 @@
 #define MDIO_AN_VEND_PROV			0xc400
 #define MDIO_AN_VEND_PROV_1000BASET_FULL	BIT(15)
 #define MDIO_AN_VEND_PROV_1000BASET_HALF	BIT(14)
+#define MDIO_AN_VEND_PROV_5000BASET_FULL	BIT(11)
+#define MDIO_AN_VEND_PROV_2500BASET_FULL	BIT(10)
 #define MDIO_AN_VEND_PROV_AQRATE_DWN_SHFT_CAP	BIT(12)
 #define MDIO_AN_VEND_PROV_DOWNSHIFT_EN		BIT(4)
 #define MDIO_AN_VEND_PROV_DOWNSHIFT_MASK	GENMASK(3, 0)
@@ -62,6 +67,7 @@
 #define MDIO_AN_TX_VEND_INT_STATUS1_DOWNSHIFT	BIT(1)
 
 #define MDIO_AN_TX_VEND_INT_STATUS2		0xcc01
+#define MDIO_AN_TX_VEND_INT_STATUS2_MASK	BIT(0)
 
 #define MDIO_AN_TX_VEND_INT_MASK2		0xd401
 #define MDIO_AN_TX_VEND_INT_MASK2_LINK		BIT(0)
@@ -79,16 +85,6 @@
 
 #define MDIO_AN_RX_VEND_STAT3			0xe832
 #define MDIO_AN_RX_VEND_STAT3_AFR		BIT(0)
-
-#define MDIO_AN_VEND_PROV1		0xC440
-#define MDIO_AN_VEND_PROV1_5G		BIT(11)
-#define MDIO_AN_VEND_PROV1_2_5G		BIT(10)
-#define MDIO_AN_10GBT_CTRL_5GBASET	BIT(8)
-#define MDIO_AN_10GBT_CTRL_10GBASET	BIT(12)
-#define MDIO_AN_10GBT_CTRL_2_5GBASET	BIT(7)
-
-#define MDIO_AN_PAUSE			BIT(10)
-#define MDIO_AN_ASYM_PAUSE		BIT(11)
 
 #define MDIO_AN_LD_LOOP_TIMING_ABILITY	BIT(0)
 #define MDIO_MMD_AN_WOL_ENABLE		BIT(6)
@@ -123,7 +119,11 @@
 /* Vendor specific 1, MDIO_MMD_VEND1 */
 #define VEND1_GLOBAL_FW_ID			0x0020
 #define VEND1_GLOBAL_FW_ID_MAJOR		GENMASK(15, 8)
+#define VEND1_GLOBAL_FW_ID_MASK			GENMASK(15, 0)
 #define VEND1_GLOBAL_FW_ID_MINOR		GENMASK(7, 0)
+
+#define VEND1_GLOBAL_GEN_STAT2			0xc831
+#define VEND1_GLOBAL_GEN_STAT2_OP_IN_PROG	BIT(15)
 
 #define VEND1_GLOBAL_RSVD_STAT1			0xc885
 #define VEND1_GLOBAL_RSVD_STAT1_FW_BUILD_ID	GENMASK(7, 4)
@@ -159,8 +159,14 @@
 #define VEND1_GLOBAL_INT_VEND_MASK_GLOBAL2	BIT(1)
 #define VEND1_GLOBAL_INT_VEND_MASK_GLOBAL3	BIT(0)
 
-#define VEND1_GLOBAL_MDIO_CTRL1			0x0
-#define VEND1_GLOBAL_MDIO_CTRL1_SOFT_RST	BIT(15)
+#define VEND1_GLOBAL_CMN_POR_CTRL	0x2681U
+#define PHY_RESET			BIT(0)
+
+/* Sleep and timeout for checking if the Processor-Intensive
+ * MDIO operation is finished
+ */
+#define AQR107_OP_IN_PROG_SLEEP		1000
+#define AQR107_OP_IN_PROG_TIMEOUT	100000
 
 #define VEND1_GLOBAL_MDIO_PHYXS_PROV2		0xC441
 #define VEND1_GLOBAL_MDIO_PHYXS_PROV2_USX_AN	BIT(3)
@@ -207,7 +213,11 @@ static const struct aqr107_hw_stat aqr107_hw_stats[] = {
 
 struct aqr107_priv {
 	u64 sgmii_stats[AQR107_SGMII_STAT_SZ];
+	int led_mode0;
+	int led_mode1;
+	int led_mode2;
 	int wol_status;
+	bool skip_lpm;	/* skip low power mode */
 };
 
 static int aqr107_get_sset_count(struct phy_device *phydev)
@@ -296,9 +306,20 @@ static int aqr_config_aneg(struct phy_device *phydev)
 			      phydev->advertising))
 		reg |= MDIO_AN_VEND_PROV_1000BASET_HALF;
 
+	/* Handle the case when the 2.5G and 5G speeds are not advertised */
+	if (linkmode_test_bit(ETHTOOL_LINK_MODE_2500baseT_Full_BIT,
+			      phydev->advertising))
+		reg |= MDIO_AN_VEND_PROV_2500BASET_FULL;
+
+	if (linkmode_test_bit(ETHTOOL_LINK_MODE_5000baseT_Full_BIT,
+			      phydev->advertising))
+		reg |= MDIO_AN_VEND_PROV_5000BASET_FULL;
+
 	ret = phy_modify_mmd_changed(phydev, MDIO_MMD_AN, MDIO_AN_VEND_PROV,
 				     MDIO_AN_VEND_PROV_1000BASET_HALF |
-				     MDIO_AN_VEND_PROV_1000BASET_FULL, reg);
+				     MDIO_AN_VEND_PROV_1000BASET_FULL |
+				     MDIO_AN_VEND_PROV_2500BASET_FULL |
+				     MDIO_AN_VEND_PROV_5000BASET_FULL, reg);
 	if (ret < 0)
 		return ret;
 	if (ret > 0)
@@ -308,14 +329,59 @@ static int aqr_config_aneg(struct phy_device *phydev)
 	if (!err) {
 		if (phy_mode == 1) {
 			phydev_info(phydev, "Configuring AQR PHY to 5G Mode\n");
-			phy_write_mmd(phydev, MDIO_MMD_VEND1, VEND1_GLOBAL_CFG_2_5G, 0x0106);
-			phy_write_mmd(phydev, MDIO_MMD_VEND1, VEND1_GLOBAL_CFG_5G, 0x0106);
-			phy_write_mmd(phydev, MDIO_MMD_VEND1, VEND1_GLOBAL_CFG_10G, 0x0000);
+
+			ret = phy_write_mmd(phydev, MDIO_MMD_VEND1, VEND1_GLOBAL_CFG_2_5G, 0x0106);
+			if (ret < 0) {
+				phydev_info(phydev, "Fail to configure VEND1_GLOBAL_CFG_2_5GT\n");
+				return ret;
+			}
+
+			ret = phy_write_mmd(phydev, MDIO_MMD_VEND1, VEND1_GLOBAL_CFG_5G, 0x0106);
+			if (ret < 0) {
+				phydev_info(phydev, "Fail to configure VEND1_GLOBAL_CFG_5G\n");
+				return ret;
+			}
+
+			ret = phy_write_mmd(phydev, MDIO_MMD_VEND1, VEND1_GLOBAL_SYS_CONFIG_1G,
+					    0x0106);
+			if (ret < 0) {
+				phydev_info(phydev, "Fail to configure VEND1_GLOBAL_SYS_CONFIG_1G\n");
+				return ret;
+			}
+
+			ret = phy_write_mmd(phydev, MDIO_MMD_VEND1, VEND1_GLOBAL_SYS_CONFIG_100M,
+					    0x0106);
+			if (ret < 0) {
+				phydev_info(phydev, "Fail to configure VEND1_GLOBAL_SYS_CONFIG_100M\n");
+				return ret;
+			}
+
+			ret = phy_write_mmd(phydev, MDIO_MMD_VEND1, VEND1_GLOBAL_CFG_10G, 0x0000);
+			if (ret < 0) {
+				phydev_info(phydev, "Fail to configure VEND1_GLOBAL_CFG_10G\n");
+				return ret;
+			}
+
 			/* Disable 10G advertizement and restart autoneg */
-			phy_write_mmd(phydev, MDIO_MMD_AN, MDIO_AN_10GBT_CTRL, 0x01E1);
+			ret = phy_write_mmd(phydev, MDIO_MMD_AN, MDIO_AN_10GBT_CTRL, 0x01E1);
+			if (ret < 0) {
+				phydev_info(phydev, "Fail to configure MDIO_AN_10GBT_CTRL\n");
+				return ret;
+			}
+
 			/* restart auto-negotiation */
-			genphy_c45_restart_aneg(phydev);
-			phy_write_mmd(phydev, MDIO_MMD_PHYXS, VEND1_GLOBAL_MDIO_PHYXS_PROV2, 0x8);
+			ret = genphy_c45_restart_aneg(phydev);
+			if (ret < 0) {
+				phydev_info(phydev, "Fail to restart auto neg\n");
+				return ret;
+			}
+
+			ret = phy_write_mmd(phydev, MDIO_MMD_PHYXS, VEND1_GLOBAL_MDIO_PHYXS_PROV2,
+					    0x8);
+			if (ret < 0) {
+				phydev_info(phydev, "Fail to configure VEND1_GLOBAL_MDIO_PHYXS_PROV2\n");
+				return ret;
+			}
 		}
 	} else {
 		phydev_info(phydev, "No AQR phy_mode setting in DT\n");
@@ -329,6 +395,13 @@ static int aqr_config_intr(struct phy_device *phydev)
 	bool en = phydev->interrupts == PHY_INTERRUPT_ENABLED;
 	int err;
 
+	if (en) {
+		/* Clear any pending interrupts before enabling them */
+		err = phy_read_mmd(phydev, MDIO_MMD_AN, MDIO_AN_TX_VEND_INT_STATUS2);
+		if (err < 0)
+			return err;
+	}
+
 	err = phy_write_mmd(phydev, MDIO_MMD_AN, MDIO_AN_TX_VEND_INT_MASK2,
 			    en ? MDIO_AN_TX_VEND_INT_MASK2_LINK : 0);
 	if (err < 0)
@@ -339,15 +412,27 @@ static int aqr_config_intr(struct phy_device *phydev)
 	if (err < 0)
 		return err;
 
-	return phy_write_mmd(phydev, MDIO_MMD_VEND1, VEND1_GLOBAL_INT_VEND_MASK,
-			     en ? VEND1_GLOBAL_INT_VEND_MASK_GLOBAL3 |
-			     VEND1_GLOBAL_INT_VEND_MASK_AN : 0);
+	err = phy_write_mmd(phydev, MDIO_MMD_VEND1, VEND1_GLOBAL_INT_VEND_MASK,
+			    en ? VEND1_GLOBAL_INT_VEND_MASK_GLOBAL3 |
+			    VEND1_GLOBAL_INT_VEND_MASK_AN : 0);
+	if (err < 0)
+		return err;
+
+	if (!en) {
+		/* Clear any pending interrupts after we have disabled them */
+		err = phy_read_mmd(phydev, MDIO_MMD_AN, MDIO_AN_TX_VEND_INT_STATUS2);
+		if (err < 0)
+			return err;
+	}
+
+	return 0;
 }
 
-static int aqr_ack_interrupt(struct phy_device *phydev)
+static irqreturn_t aqr_handle_interrupt(struct phy_device *phydev)
 {
-	int reg;
-	int val, ret;
+	int reg, val, ret;
+	int irq_status;
+
 	struct aqr107_priv *priv = phydev->priv;
 	reg = phy_read_mmd(phydev, MDIO_MMD_C22EXT, MDIO_C22EXT_GBE_PHY_SGMII_TX_ALARM1);
 	if ((reg & MDIO_C22EXT_SGMII0_MAGIC_PKT_FRAME_MASK) ==
@@ -357,25 +442,35 @@ static int aqr_ack_interrupt(struct phy_device *phydev)
 		val &= ~MDIO_MMD_AN_WOL_ENABLE;
 		ret = phy_write_mmd(phydev, MDIO_MMD_AN, MDIO_AN_RSVD_VEND_PROV1, val);
 		if (ret < 0)
-			return ret;
+			return IRQ_NONE;
 
 		/* Restore the SERDES/System Interface back to the XFI mode */
 		ret = phy_write_mmd(phydev, MDIO_MMD_VEND1,
 				    VEND1_GLOBAL_SYS_CONFIG_100M, VEND1_GLOBAL_SYS_CONFIG_XFI);
 		if (ret < 0)
-			return ret;
+			return IRQ_NONE;
 		ret = phy_write_mmd(phydev, MDIO_MMD_VEND1,
 				    VEND1_GLOBAL_SYS_CONFIG_1G, VEND1_GLOBAL_SYS_CONFIG_XFI);
 		if (ret < 0)
-			return ret;
+			return IRQ_NONE;
 		/* restart auto-negotiation */
 		priv->wol_status = 0;
 		return genphy_c45_restart_aneg(phydev);
 	}
-	reg = phy_read_mmd(phydev, MDIO_MMD_AN,
-			   MDIO_AN_TX_VEND_INT_STATUS2);
 
-	return (reg < 0) ? reg : 0;
+	irq_status = phy_read_mmd(phydev, MDIO_MMD_AN,
+				  MDIO_AN_TX_VEND_INT_STATUS2);
+	if (irq_status < 0) {
+		phy_error(phydev);
+		return IRQ_NONE;
+	}
+
+	if (!(irq_status & MDIO_AN_TX_VEND_INT_STATUS2_MASK))
+		return IRQ_NONE;
+
+	phy_trigger_machine(phydev);
+
+	return IRQ_HANDLED;
 }
 
 static int aqr_read_status(struct phy_device *phydev)
@@ -554,27 +649,10 @@ static int aqr107_wait_reset_complete(struct phy_device *phydev)
 	int val;
 
 	return phy_read_mmd_poll_timeout(phydev, MDIO_MMD_VEND1,
-					 VEND1_GLOBAL_FW_ID, val, val != 0,
+					 VEND1_GLOBAL_FW_ID, val,
+					 ((val & VEND1_GLOBAL_FW_ID_MASK) != 0 &&
+					 (val & VEND1_GLOBAL_FW_ID_MASK) != VEND1_GLOBAL_FW_ID_MASK),
 					 20000, 2000000, false);
-}
-
-static inline int wait_for_reset_complete(struct phy_device *phydev)
-{
-	unsigned int retries = 1000;
-	int ret = 0;
-
-	do {
-		ret = phy_read_mmd(phydev, MDIO_MMD_VEND1,
-				   VEND1_GLOBAL_MDIO_CTRL1);
-		if (ret < 0)
-			return ret;
-		msleep(1);
-	} while ((ret & VEND1_GLOBAL_MDIO_CTRL1_SOFT_RST) && --retries);
-
-	if (ret & VEND1_GLOBAL_MDIO_CTRL1_SOFT_RST)
-		return -ETIMEDOUT;
-
-	return 0;
 }
 
 static void aqr107_chip_info(struct phy_device *phydev)
@@ -600,6 +678,73 @@ static void aqr107_chip_info(struct phy_device *phydev)
 		   fw_major, fw_minor, build_id, prov_id);
 }
 
+static void aqr_apply_led_mode_cfg(struct phy_device *phydev)
+{
+	struct aqr107_priv *priv = phydev->priv;
+
+	if (priv->led_mode0 > 0)
+		phy_write_mmd(phydev, MDIO_MMD_VEND1, 0xc430, priv->led_mode0);
+
+	if (priv->led_mode1 > 0)
+		phy_write_mmd(phydev, MDIO_MMD_VEND1, 0xc431, priv->led_mode1);
+
+	if (priv->led_mode2 > 0)
+		phy_write_mmd(phydev, MDIO_MMD_VEND1, 0xc432, priv->led_mode2);
+}
+
+static int aqr_read_led_mode_cfg(struct phy_device *phydev)
+{
+	struct device_node *node = phydev->mdio.dev.of_node;
+	struct aqr107_priv *priv = phydev->priv;
+	int err = 0;
+	int n = 0;
+
+	priv->led_mode0 = -1;
+	priv->led_mode1 = -1;
+	priv->led_mode2 = -1;
+
+	n = of_property_count_u32_elems(node, "aquantia,led-mode");
+
+	/* We expect from 1 to 3 pairs of LED modes ("0 led_0_value 1 led_1_value 2 led_2_value") */
+
+	if (n > 1) {
+		if (n > 6 || n % 2) {
+			phydev_info(phydev, "Aquantia: incorrect number of led-mode parameters\n");
+			return -EINVAL;
+		} else {
+			int i = 0;
+			u32 led_modes[6];
+
+			err = of_property_read_u32_array(node, "aquantia,led-mode",
+							 &led_modes[0], n);
+			if (err)
+				return err;
+
+			for (i = 0; i < n; i += 2) {
+				if (led_modes[i] > 2) {
+					phydev_info(phydev, "Aquantia: incorrect value of led-mode parameter\n");
+					return -EINVAL;
+				}
+
+				switch (led_modes[i]) {
+				case 0:
+					priv->led_mode0 = led_modes[i + 1];
+					break;
+				case 2:
+					priv->led_mode1 = led_modes[i + 1];
+					break;
+				case 4:
+					priv->led_mode2 = led_modes[i + 1];
+					break;
+				default:
+					break;
+				}
+			}
+		}
+	}
+	return 0;
+}
+
 static int aqr107_config_init(struct phy_device *phydev)
 {
 	int ret, err;
@@ -615,6 +760,11 @@ static int aqr107_config_init(struct phy_device *phydev)
 
 	WARN(phydev->interface == PHY_INTERFACE_MODE_XGMII,
 	     "Your devicetree is out of date, please update it. The AQR107 family doesn't support XGMII, maybe you mean USXGMII.\n");
+
+	/* SW WAR to reset PHY again to overcome link issues caused during boot */
+	err = phy_write_mmd(phydev, MDIO_MMD_VEND1, VEND1_GLOBAL_CMN_POR_CTRL, PHY_RESET);
+	if (err < 0)
+		return err;
 
 	ret = aqr107_wait_reset_complete(phydev);
 	if (!ret)
@@ -664,6 +814,8 @@ static int aqr107_config_init(struct phy_device *phydev)
 		phydev_err(phydev, "Error setting magic packet frame of 4/5th byte\n");
 		return err;
 	}
+
+	aqr_apply_led_mode_cfg(phydev);
 
 	return aqr107_set_downshift(phydev, MDIO_AN_VEND_PROV_DOWNSHIFT_DFLT);
 }
@@ -737,24 +889,80 @@ static void aqr107_link_change_notify(struct phy_device *phydev)
 		phydev_info(phydev, "Aquantia 1000Base-T2 mode active\n");
 }
 
+static int aqr107_wait_processor_intensive_op(struct phy_device *phydev)
+{
+	int val, err;
+
+	/* The datasheet notes to wait at least 1ms after issuing a
+	 * processor intensive operation before checking.
+	 * We cannot use the 'sleep_before_read' parameter of read_poll_timeout
+	 * because that just determines the maximum time slept, not the minimum.
+	 */
+	usleep_range(1000, 5000);
+
+	err = phy_read_mmd_poll_timeout(phydev, MDIO_MMD_VEND1,
+					VEND1_GLOBAL_GEN_STAT2, val,
+					!(val & VEND1_GLOBAL_GEN_STAT2_OP_IN_PROG),
+					AQR107_OP_IN_PROG_SLEEP,
+					AQR107_OP_IN_PROG_TIMEOUT, false);
+	if (err) {
+		phydev_err(phydev, "timeout: processor-intensive MDIO operation\n");
+		return err;
+	}
+
+	return 0;
+}
+
 static int aqr107_suspend(struct phy_device *phydev)
 {
-	return phy_set_bits_mmd(phydev, MDIO_MMD_VEND1, MDIO_CTRL1,
-				MDIO_CTRL1_LPOWER);
+	int err;
+	struct aqr107_priv *priv = phydev->priv;
+
+	if (priv->skip_lpm)
+		return 0;
+
+	err = phy_set_bits_mmd(phydev, MDIO_MMD_VEND1, MDIO_CTRL1,
+			       MDIO_CTRL1_LPOWER);
+	if (err)
+		return err;
+
+	return aqr107_wait_processor_intensive_op(phydev);
 }
 
 static int aqr107_resume(struct phy_device *phydev)
 {
-	return phy_clear_bits_mmd(phydev, MDIO_MMD_VEND1, MDIO_CTRL1,
-				  MDIO_CTRL1_LPOWER);
+	int err;
+	struct aqr107_priv *priv = phydev->priv;
+
+	if (priv->skip_lpm)
+		return 0;
+
+	err = phy_clear_bits_mmd(phydev, MDIO_MMD_VEND1, MDIO_CTRL1,
+				 MDIO_CTRL1_LPOWER);
+	if (err)
+		return err;
+
+	return aqr107_wait_processor_intensive_op(phydev);
 }
 
 static int aqr107_probe(struct phy_device *phydev)
 {
-	phydev->priv = devm_kzalloc(&phydev->mdio.dev,
-				    sizeof(struct aqr107_priv), GFP_KERNEL);
-	if (!phydev->priv)
+	struct device_node *node = phydev->mdio.dev.of_node;
+	struct aqr107_priv *priv;
+
+	priv = devm_kzalloc(&phydev->mdio.dev,
+			    sizeof(struct aqr107_priv), GFP_KERNEL);
+	if (!priv)
 		return -ENOMEM;
+
+	if (of_property_read_bool(node, "aquantia,skip-lpm"))
+		priv->skip_lpm = true;
+	else
+		priv->skip_lpm = false;
+
+	phydev->priv = priv;
+
+	aqr_read_led_mode_cfg(phydev);
 
 	return aqr_hwmon_probe(phydev);
 }
@@ -839,7 +1047,7 @@ static int aqr113c_wol_settings(struct phy_device *phydev, bool enable)
 
 		/* restart auto-negotiation */
 		genphy_c45_restart_aneg(phydev);
-		priv->wol_status = 1;
+		priv->wol_status = WAKE_MAGIC;
 	} else {
 		/* Disable the WoL enable bit */
 		val = phy_read_mmd(phydev, MDIO_MMD_AN, MDIO_AN_RSVD_VEND_PROV1);
@@ -881,6 +1089,12 @@ static void aqr113c_get_wol(struct phy_device *phydev, struct ethtool_wolinfo *w
 
 static int aqr113c_set_wol(struct phy_device *phydev, struct ethtool_wolinfo *wol)
 {
+	struct aqr107_priv *priv = phydev->priv;
+
+	/* Return success if WOL is already set. Don't entertain duplicate setting of WOL */
+	if (!(priv->wol_status ^ wol->wolopts))
+		return 0;
+
 	if (wol->wolopts & WAKE_MAGIC)
 		return aqr113c_wol_settings(phydev, true);
 	else
@@ -894,7 +1108,7 @@ static struct phy_driver aqr_driver[] = {
 	.name		= "Aquantia AQ1202",
 	.config_aneg    = aqr_config_aneg,
 	.config_intr	= aqr_config_intr,
-	.ack_interrupt	= aqr_ack_interrupt,
+	.handle_interrupt = aqr_handle_interrupt,
 	.read_status	= aqr_read_status,
 },
 {
@@ -902,7 +1116,7 @@ static struct phy_driver aqr_driver[] = {
 	.name		= "Aquantia AQ2104",
 	.config_aneg    = aqr_config_aneg,
 	.config_intr	= aqr_config_intr,
-	.ack_interrupt	= aqr_ack_interrupt,
+	.handle_interrupt = aqr_handle_interrupt,
 	.read_status	= aqr_read_status,
 },
 {
@@ -910,7 +1124,7 @@ static struct phy_driver aqr_driver[] = {
 	.name		= "Aquantia AQR105",
 	.config_aneg    = aqr_config_aneg,
 	.config_intr	= aqr_config_intr,
-	.ack_interrupt	= aqr_ack_interrupt,
+	.handle_interrupt = aqr_handle_interrupt,
 	.read_status	= aqr_read_status,
 	.suspend	= aqr107_suspend,
 	.resume		= aqr107_resume,
@@ -920,7 +1134,7 @@ static struct phy_driver aqr_driver[] = {
 	.name		= "Aquantia AQR106",
 	.config_aneg    = aqr_config_aneg,
 	.config_intr	= aqr_config_intr,
-	.ack_interrupt	= aqr_ack_interrupt,
+	.handle_interrupt = aqr_handle_interrupt,
 	.read_status	= aqr_read_status,
 },
 {
@@ -930,7 +1144,7 @@ static struct phy_driver aqr_driver[] = {
 	.config_init	= aqr107_config_init,
 	.config_aneg    = aqr_config_aneg,
 	.config_intr	= aqr_config_intr,
-	.ack_interrupt	= aqr_ack_interrupt,
+	.handle_interrupt = aqr_handle_interrupt,
 	.read_status	= aqr107_read_status,
 	.get_tunable    = aqr107_get_tunable,
 	.set_tunable    = aqr107_set_tunable,
@@ -948,7 +1162,7 @@ static struct phy_driver aqr_driver[] = {
 	.config_init	= aqcs109_config_init,
 	.config_aneg    = aqr_config_aneg,
 	.config_intr	= aqr_config_intr,
-	.ack_interrupt	= aqr_ack_interrupt,
+	.handle_interrupt = aqr_handle_interrupt,
 	.read_status	= aqr107_read_status,
 	.get_tunable    = aqr107_get_tunable,
 	.set_tunable    = aqr107_set_tunable,
@@ -966,7 +1180,7 @@ static struct phy_driver aqr_driver[] = {
 	.config_init	= aqr107_config_init,
 	.config_aneg    = aqr_config_aneg,
 	.config_intr	= aqr_config_intr,
-	.ack_interrupt	= aqr_ack_interrupt,
+	.handle_interrupt = aqr_handle_interrupt,
 	.read_status	= aqr107_read_status,
 	.get_tunable    = aqr107_get_tunable,
 	.set_tunable    = aqr107_set_tunable,
@@ -984,7 +1198,7 @@ static struct phy_driver aqr_driver[] = {
 	.name		= "Aquantia AQR405",
 	.config_aneg    = aqr_config_aneg,
 	.config_intr	= aqr_config_intr,
-	.ack_interrupt	= aqr_ack_interrupt,
+	.handle_interrupt = aqr_handle_interrupt,
 	.read_status	= aqr_read_status,
 },
 };

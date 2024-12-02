@@ -2044,7 +2044,7 @@ static irqreturn_t tegra194_cbb_err_isr(int irq, void *data)
 			 */
 			if (priv->noc->erd_mask_inband_err) {
 				mstr_id =  FIELD_GET(CBB_NOC_MSTR_ID, priv->errlog5);
-				if ((mstr_id == 0x1))
+				if (mstr_id == 0x1)
 					is_inband_err = 1;
 			}
 		}
@@ -2341,7 +2341,6 @@ static struct platform_driver tegra194_cbb_driver = {
 	.probe = tegra194_cbb_probe,
 	.remove = tegra194_cbb_remove,
 	.driver = {
-		.owner = THIS_MODULE,
 		.name = "tegra194-cbb",
 		.of_match_table = of_match_ptr(tegra194_cbb_match),
 		.pm = &tegra194_cbb_pm,

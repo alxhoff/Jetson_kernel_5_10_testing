@@ -104,10 +104,8 @@ struct stream_encoder {
 	struct dc_bios *bp;
 	enum engine_id id;
 	uint32_t stream_enc_inst;
-#if defined(CONFIG_DRM_AMD_DC_DCN3_0)
 	struct vpg *vpg;
 	struct afmt *afmt;
-#endif
 };
 
 struct enc_state {
@@ -167,9 +165,11 @@ struct stream_encoder_funcs {
 		struct stream_encoder *enc);
 
 	void (*dp_blank)(
+		struct dc_link *link,
 		struct stream_encoder *enc);
 
 	void (*dp_unblank)(
+		struct dc_link *link,
 		struct stream_encoder *enc,
 		const struct encoder_unblank_param *param);
 
@@ -239,6 +239,9 @@ struct stream_encoder_funcs {
 	void (*dp_set_odm_combine)(
 		struct stream_encoder *enc,
 		bool odm_combine);
+
+	uint32_t (*get_fifo_cal_average_level)(
+		struct stream_encoder *enc);
 };
 
 #endif /* STREAM_ENCODER_H_ */

@@ -163,7 +163,8 @@ static int altera_tse_mdio_create(struct net_device *dev, unsigned int id)
 	mdio = mdiobus_alloc();
 	if (mdio == NULL) {
 		netdev_err(dev, "Error allocating MDIO bus\n");
-		return -ENOMEM;
+		ret = -ENOMEM;
+		goto put_node;
 	}
 
 	mdio->name = ALTERA_TSE_RESOURCE_NAME;
@@ -180,6 +181,7 @@ static int altera_tse_mdio_create(struct net_device *dev, unsigned int id)
 			   mdio->id);
 		goto out_free_mdio;
 	}
+	of_node_put(mdio_node);
 
 	if (netif_msg_drv(priv))
 		netdev_info(dev, "MDIO bus %s: created\n", mdio->id);
@@ -189,6 +191,8 @@ static int altera_tse_mdio_create(struct net_device *dev, unsigned int id)
 out_free_mdio:
 	mdiobus_free(mdio);
 	mdio = NULL;
+put_node:
+	of_node_put(mdio_node);
 	return ret;
 }
 
@@ -849,7 +853,7 @@ static int init_phy(struct net_device *dev)
 	return 0;
 }
 
-static void tse_update_mac_addr(struct altera_tse_private *priv, u8 *addr)
+static void tse_update_mac_addr(struct altera_tse_private *priv, const u8 *addr)
 {
 	u32 msb;
 	u32 lsb;
@@ -1351,7 +1355,6 @@ static int altera_tse_probe(struct platform_device *pdev)
 	struct resource *control_port;
 	struct resource *dma_res;
 	struct altera_tse_private *priv;
-	const unsigned char *macaddr;
 	void __iomem *descmap;
 	const struct of_device_id *of_id = NULL;
 
@@ -1528,10 +1531,8 @@ static int altera_tse_probe(struct platform_device *pdev)
 	priv->rx_dma_buf_sz = ALTERA_RXDMABUFFER_SIZE;
 
 	/* get default MAC address from device tree */
-	macaddr = of_get_mac_address(pdev->dev.of_node);
-	if (!IS_ERR(macaddr))
-		ether_addr_copy(ndev->dev_addr, macaddr);
-	else
+	ret = of_get_ethdev_address(pdev->dev.of_node, ndev);
+	if (ret)
 		eth_hw_addr_random(ndev);
 
 	/* get phy addr and create mdio */

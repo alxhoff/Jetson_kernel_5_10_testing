@@ -1855,8 +1855,8 @@ static const struct {
 	{ DRM_FORMAT_XBGR4444, 0x21, },
 	{ DRM_FORMAT_RGBX4444, 0x22, },
 
-	{ DRM_FORMAT_ARGB1555, 0x25, },
-	{ DRM_FORMAT_ABGR1555, 0x26, },
+	{ DRM_FORMAT_XRGB1555, 0x25, },
+	{ DRM_FORMAT_XBGR1555, 0x26, },
 
 	{ DRM_FORMAT_XRGB8888, 0x27, },
 	{ DRM_FORMAT_XBGR8888, 0x28, },
@@ -2608,16 +2608,9 @@ void dispc_remove(struct tidss_device *tidss)
 static int dispc_iomap_resource(struct platform_device *pdev, const char *name,
 				void __iomem **base)
 {
-	struct resource *res;
 	void __iomem *b;
 
-	res = platform_get_resource_byname(pdev, IORESOURCE_MEM, name);
-	if (!res) {
-		dev_err(&pdev->dev, "cannot get mem resource '%s'\n", name);
-		return -EINVAL;
-	}
-
-	b = devm_ioremap_resource(&pdev->dev, res);
+	b = devm_platform_ioremap_resource_byname(pdev, name);
 	if (IS_ERR(b)) {
 		dev_err(&pdev->dev, "cannot ioremap resource '%s'\n", name);
 		return PTR_ERR(b);

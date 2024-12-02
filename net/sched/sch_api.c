@@ -884,7 +884,7 @@ static void qdisc_offload_graft_root(struct net_device *dev,
 static int tc_fill_qdisc(struct sk_buff *skb, struct Qdisc *q, u32 clid,
 			 u32 portid, u32 seq, u16 flags, int event)
 {
-	struct gnet_stats_basic_cpu __percpu *cpu_bstats = NULL;
+	struct gnet_stats_basic_sync __percpu *cpu_bstats = NULL;
 	struct gnet_stats_queue __percpu *cpu_qstats = NULL;
 	struct tcmsg *tcm;
 	struct nlmsghdr  *nlh;
@@ -942,8 +942,7 @@ static int tc_fill_qdisc(struct sk_buff *skb, struct Qdisc *q, u32 clid,
 		cpu_qstats = q->cpu_qstats;
 	}
 
-	if (gnet_stats_copy_basic(qdisc_root_sleeping_running(q),
-				  &d, cpu_bstats, &q->bstats) < 0 ||
+	if (gnet_stats_copy_basic(&d, cpu_bstats, &q->bstats, true) < 0 ||
 	    gnet_stats_copy_rate_est(&d, &q->rate_est) < 0 ||
 	    gnet_stats_copy_queue(&d, cpu_qstats, &q->qstats, qlen) < 0)
 		goto nla_put_failure;
@@ -1062,7 +1061,7 @@ static int qdisc_graft(struct net_device *dev, struct Qdisc *parent,
 
 		qdisc_offload_graft_root(dev, new, old, extack);
 
-		if (new && new->ops->attach)
+		if (new && new->ops->attach && !ingress)
 			goto skip;
 
 		for (i = 0; i < num_q; i++) {
@@ -1081,11 +1080,12 @@ static int qdisc_graft(struct net_device *dev, struct Qdisc *parent,
 
 skip:
 		if (!ingress) {
-			notify_and_destroy(net, skb, n, classid,
-					   rtnl_dereference(dev->qdisc), new);
+			old = rtnl_dereference(dev->qdisc);
 			if (new && !new->ops->attach)
 				qdisc_refcount_inc(new);
 			rcu_assign_pointer(dev->qdisc, new ? : &noop_qdisc);
+
+			notify_and_destroy(net, skb, n, classid, old, new);
 
 			if (new && new->ops->attach)
 				new->ops->attach(new);
@@ -1111,6 +1111,11 @@ skip:
 		if (!cl) {
 			NL_SET_ERR_MSG(extack, "Specified class not found");
 			return -ENOENT;
+		}
+
+		if (new && new->ops == &noqueue_qdisc_ops) {
+			NL_SET_ERR_MSG(extack, "Cannot assign noqueue to a class");
+			return -EINVAL;
 		}
 
 		err = cops->graft(parent, cl, new, &old, extack);
@@ -1177,7 +1182,7 @@ static struct Qdisc *qdisc_create(struct net_device *dev,
 #ifdef CONFIG_MODULES
 	if (ops == NULL && kind != NULL) {
 		char name[IFNAMSIZ];
-		if (nla_strlcpy(name, kind, IFNAMSIZ) < IFNAMSIZ) {
+		if (nla_strscpy(name, kind, IFNAMSIZ) >= 0) {
 			/* We dropped the RTNL semaphore in order to
 			 * perform the module load.  So, even if we
 			 * succeeded in loading the module we have to
@@ -1217,7 +1222,12 @@ static struct Qdisc *qdisc_create(struct net_device *dev,
 	sch->parent = parent;
 
 	if (handle == TC_H_INGRESS) {
-		sch->flags |= TCQ_F_INGRESS;
+		if (!(sch->flags & TCQ_F_INGRESS)) {
+			NL_SET_ERR_MSG(extack,
+				       "Specified parent ID is reserved for ingress and clsact Qdiscs");
+			err = -EINVAL;
+			goto err_out3;
+		}
 		handle = TC_H_MAKE(TC_H_INGRESS, 0);
 	} else {
 		if (handle == 0) {
@@ -1264,26 +1274,17 @@ static struct Qdisc *qdisc_create(struct net_device *dev,
 		rcu_assign_pointer(sch->stab, stab);
 	}
 	if (tca[TCA_RATE]) {
-		seqcount_t *running;
-
 		err = -EOPNOTSUPP;
 		if (sch->flags & TCQ_F_MQROOT) {
 			NL_SET_ERR_MSG(extack, "Cannot attach rate estimator to a multi-queue root qdisc");
 			goto err_out4;
 		}
 
-		if (sch->parent != TC_H_ROOT &&
-		    !(sch->flags & TCQ_F_INGRESS) &&
-		    (!p || !(p->flags & TCQ_F_MQROOT)))
-			running = qdisc_root_sleeping_running(sch);
-		else
-			running = &sch->running;
-
 		err = gen_new_estimator(&sch->bstats,
 					sch->cpu_bstats,
 					&sch->rate_est,
 					NULL,
-					running,
+					true,
 					tca[TCA_RATE]);
 		if (err) {
 			NL_SET_ERR_MSG(extack, "Failed to generate new estimator");
@@ -1359,7 +1360,7 @@ static int qdisc_change(struct Qdisc *sch, struct nlattr **tca,
 				      sch->cpu_bstats,
 				      &sch->rate_est,
 				      NULL,
-				      qdisc_root_sleeping_running(sch),
+				      true,
 				      tca[TCA_RATE]);
 	}
 out:
@@ -1502,10 +1503,28 @@ static int tc_get_qdisc(struct sk_buff *skb, struct nlmsghdr *n,
 	return 0;
 }
 
+static bool req_create_or_replace(struct nlmsghdr *n)
+{
+	return (n->nlmsg_flags & NLM_F_CREATE &&
+		n->nlmsg_flags & NLM_F_REPLACE);
+}
+
+static bool req_create_exclusive(struct nlmsghdr *n)
+{
+	return (n->nlmsg_flags & NLM_F_CREATE &&
+		n->nlmsg_flags & NLM_F_EXCL);
+}
+
+static bool req_change(struct nlmsghdr *n)
+{
+	return (!(n->nlmsg_flags & NLM_F_CREATE) &&
+		!(n->nlmsg_flags & NLM_F_REPLACE) &&
+		!(n->nlmsg_flags & NLM_F_EXCL));
+}
+
 /*
  * Create/change qdisc.
  */
-
 static int tc_modify_qdisc(struct sk_buff *skb, struct nlmsghdr *n,
 			   struct netlink_ext_ack *extack)
 {
@@ -1578,10 +1597,19 @@ replay:
 					NL_SET_ERR_MSG(extack, "Invalid qdisc name");
 					return -EINVAL;
 				}
+				if (q->flags & TCQ_F_INGRESS) {
+					NL_SET_ERR_MSG(extack,
+						       "Cannot regraft ingress or clsact Qdiscs");
+					return -EINVAL;
+				}
 				if (q == p ||
 				    (p && check_loop(q, p, 0))) {
 					NL_SET_ERR_MSG(extack, "Qdisc parent/child loop detected");
 					return -ELOOP;
+				}
+				if (clid == TC_H_INGRESS) {
+					NL_SET_ERR_MSG(extack, "Ingress cannot graft directly");
+					return -EINVAL;
 				}
 				qdisc_refcount_inc(q);
 				goto graft;
@@ -1593,27 +1621,35 @@ replay:
 				 *
 				 *   We know, that some child q is already
 				 *   attached to this parent and have choice:
-				 *   either to change it or to create/graft new one.
+				 *   1) change it or 2) create/graft new one.
+				 *   If the requested qdisc kind is different
+				 *   than the existing one, then we choose graft.
+				 *   If they are the same then this is "change"
+				 *   operation - just let it fallthrough..
 				 *
 				 *   1. We are allowed to create/graft only
-				 *   if CREATE and REPLACE flags are set.
+				 *   if the request is explicitly stating
+				 *   "please create if it doesn't exist".
 				 *
-				 *   2. If EXCL is set, requestor wanted to say,
-				 *   that qdisc tcm_handle is not expected
+				 *   2. If the request is to exclusive create
+				 *   then the qdisc tcm_handle is not expected
 				 *   to exist, so that we choose create/graft too.
 				 *
 				 *   3. The last case is when no flags are set.
+				 *   This will happen when for example tc
+				 *   utility issues a "change" command.
 				 *   Alas, it is sort of hole in API, we
 				 *   cannot decide what to do unambiguously.
-				 *   For now we select create/graft, if
-				 *   user gave KIND, which does not match existing.
+				 *   For now we select create/graft.
 				 */
-				if ((n->nlmsg_flags & NLM_F_CREATE) &&
-				    (n->nlmsg_flags & NLM_F_REPLACE) &&
-				    ((n->nlmsg_flags & NLM_F_EXCL) ||
-				     (tca[TCA_KIND] &&
-				      nla_strcmp(tca[TCA_KIND], q->ops->id))))
-					goto create_n_graft;
+				if (tca[TCA_KIND] &&
+				    nla_strcmp(tca[TCA_KIND], q->ops->id)) {
+					if (req_create_or_replace(n) ||
+					    req_create_exclusive(n))
+						goto create_n_graft;
+					else if (req_change(n))
+						goto create_n_graft2;
+				}
 			}
 		}
 	} else {
@@ -1647,6 +1683,7 @@ create_n_graft:
 		NL_SET_ERR_MSG(extack, "Qdisc not found. To create specify NLM_F_CREATE flag");
 		return -ENOENT;
 	}
+create_n_graft2:
 	if (clid == TC_H_INGRESS) {
 		if (dev_ingress_queue(dev)) {
 			q = qdisc_create(dev, dev_ingress_queue(dev), p,
@@ -1852,7 +1889,6 @@ static int tclass_notify(struct net *net, struct sk_buff *oskb,
 {
 	struct sk_buff *skb;
 	u32 portid = oskb ? NETLINK_CB(oskb).portid : 0;
-	int err = 0;
 
 	skb = alloc_skb(NLMSG_GOODSIZE, GFP_KERNEL);
 	if (!skb)
@@ -1863,17 +1899,15 @@ static int tclass_notify(struct net *net, struct sk_buff *oskb,
 		return -EINVAL;
 	}
 
-	err = rtnetlink_send(skb, net, portid, RTNLGRP_TC,
-			     n->nlmsg_flags & NLM_F_ECHO);
-	if (err > 0)
-		err = 0;
-	return err;
+	return rtnetlink_send(skb, net, portid, RTNLGRP_TC,
+			      n->nlmsg_flags & NLM_F_ECHO);
 }
 
 static int tclass_del_notify(struct net *net,
 			     const struct Qdisc_class_ops *cops,
 			     struct sk_buff *oskb, struct nlmsghdr *n,
-			     struct Qdisc *q, unsigned long cl)
+			     struct Qdisc *q, unsigned long cl,
+			     struct netlink_ext_ack *extack)
 {
 	u32 portid = oskb ? NETLINK_CB(oskb).portid : 0;
 	struct sk_buff *skb;
@@ -1892,7 +1926,7 @@ static int tclass_del_notify(struct net *net,
 		return -EINVAL;
 	}
 
-	err = cops->delete(q, cl);
+	err = cops->delete(q, cl, extack);
 	if (err) {
 		kfree_skb(skb);
 		return err;
@@ -1900,8 +1934,6 @@ static int tclass_del_notify(struct net *net,
 
 	err = rtnetlink_send(skb, net, portid, RTNLGRP_TC,
 			     n->nlmsg_flags & NLM_F_ECHO);
-	if (err > 0)
-		err = 0;
 	return err;
 }
 
@@ -1951,8 +1983,8 @@ static int tc_bind_class_walker(struct Qdisc *q, unsigned long cl,
 	     chain = tcf_get_next_chain(block, chain)) {
 		struct tcf_proto *tp;
 
-		for (tp = tcf_get_next_proto(chain, NULL, true);
-		     tp; tp = tcf_get_next_proto(chain, tp, true)) {
+		for (tp = tcf_get_next_proto(chain, NULL);
+		     tp; tp = tcf_get_next_proto(chain, tp)) {
 			struct tcf_bind_args arg = {};
 
 			arg.w.fn = tcf_node_bind;
@@ -2095,7 +2127,7 @@ static int tc_ctl_tclass(struct sk_buff *skb, struct nlmsghdr *n,
 				goto out;
 			break;
 		case RTM_DELTCLASS:
-			err = tclass_del_notify(net, cops, skb, n, q, cl);
+			err = tclass_del_notify(net, cops, skb, n, q, cl, extack);
 			/* Unbind the class with flilters with 0 */
 			tc_bind_tclass(q, portid, clid, 0);
 			goto out;

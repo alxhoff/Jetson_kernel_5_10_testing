@@ -3,7 +3,7 @@
  *
  * Regulator driver for MAXIM 8973 DC-DC step-down switching regulator.
  *
- * Copyright (c) 2012-2020, NVIDIA Corporation.
+ * Copyright (c) 2012, NVIDIA Corporation.
  *
  * Author: Laxman Dewangan <ldewangan@nvidia.com>
  *
@@ -115,12 +115,10 @@ struct max8973_chip {
 	struct regulator_desc desc;
 	struct regmap *regmap;
 	bool enable_external_control;
-	bool enable_dvs_sleep_control;
 	int dvs_gpio;
 	int lru_index[MAX8973_MAX_VOUT_REG];
 	int curr_vout_val[MAX8973_MAX_VOUT_REG];
 	int curr_vout_reg;
-	int sleep_vout_reg;
 	int curr_gpio_val;
 	struct regulator_ops ops;
 	enum device_id id;
@@ -223,26 +221,6 @@ static int max8973_dcdc_set_voltage_sel(struct regulator_dev *rdev,
 	return 0;
 }
 
-static int max8973_dcdc_set_sleep_voltage_sel(struct regulator_dev *rdev,
-		unsigned sel)
-{
-	struct max8973_chip *max = rdev_get_drvdata(rdev);
-	int ret;
-
-	if (gpio_is_valid(max->dvs_gpio) || !max->enable_dvs_sleep_control) {
-		dev_err(max->dev, "Regulator has invalid configuration\n");
-		return -EINVAL;
-	}
-	ret = regmap_update_bits(max->regmap, max->sleep_vout_reg,
-				MAX8973_VOUT_MASK, sel);
-	if (ret < 0) {
-		dev_err(max->dev, "register %d update failed %d\n",
-				max->sleep_vout_reg, ret);
-		return ret;
-	}
-	return 0;
-}
-
 static int max8973_dcdc_set_mode(struct regulator_dev *rdev, unsigned int mode)
 {
 	struct max8973_chip *max = rdev_get_drvdata(rdev);
@@ -285,33 +263,6 @@ static unsigned int max8973_dcdc_get_mode(struct regulator_dev *rdev)
 	}
 	return (data & MAX8973_FPWM_EN_M) ?
 		REGULATOR_MODE_FAST : REGULATOR_MODE_NORMAL;
-}
-
-static int max8973_set_ramp_delay(struct regulator_dev *rdev,
-		int ramp_delay)
-{
-	struct max8973_chip *max = rdev_get_drvdata(rdev);
-	unsigned int control;
-	int ret;
-
-	/* Set ramp delay */
-	if (ramp_delay <= 12000)
-		control = MAX8973_RAMP_12mV_PER_US;
-	else if (ramp_delay <= 25000)
-		control = MAX8973_RAMP_25mV_PER_US;
-	else if (ramp_delay <= 50000)
-		control = MAX8973_RAMP_50mV_PER_US;
-	else if (ramp_delay <= 200000)
-		control = MAX8973_RAMP_200mV_PER_US;
-	else
-		return -EINVAL;
-
-	ret = regmap_update_bits(max->regmap, MAX8973_CONTROL1,
-			MAX8973_RAMP_MASK, control);
-	if (ret < 0)
-		dev_err(max->dev, "register %d update failed, %d",
-				MAX8973_CONTROL1, ret);
-	return ret;
 }
 
 static int max8973_set_current_limit(struct regulator_dev *rdev,
@@ -363,6 +314,10 @@ static int max8973_get_current_limit(struct regulator_dev *rdev)
 	return 9000000;
 }
 
+static const unsigned int max8973_buck_ramp_table[] = {
+	12000, 25000, 50000, 200000
+};
+
 static const struct regulator_ops max8973_dcdc_ops = {
 	.get_voltage_sel	= max8973_dcdc_get_voltage_sel,
 	.set_voltage_sel	= max8973_dcdc_set_voltage_sel,
@@ -370,8 +325,7 @@ static const struct regulator_ops max8973_dcdc_ops = {
 	.set_mode		= max8973_dcdc_set_mode,
 	.get_mode		= max8973_dcdc_get_mode,
 	.set_voltage_time_sel	= regulator_set_voltage_time_sel,
-	.set_ramp_delay		= max8973_set_ramp_delay,
-	.set_sleep_voltage_sel	= max8973_dcdc_set_sleep_voltage_sel,
+	.set_ramp_delay		= regulator_set_ramp_delay_regmap,
 };
 
 static int max8973_init_dcdc(struct max8973_chip *max,
@@ -592,8 +546,6 @@ static struct max8973_regulator_platform_data *max8973_parse_dt(
 						"maxim,externally-enable");
 	pdata->dvs_gpio = of_get_named_gpio(np, "maxim,dvs-gpio", 0);
 
-	pdata->enable_dvs_sleep_control = of_property_read_bool(np,
-						"maxim,sleep-on-dvs");
 	ret = of_property_read_u32(np, "maxim,dvs-default-state", &pval);
 	if (!ret)
 		pdata->dvs_def_state = pval;
@@ -719,16 +671,16 @@ static int max8973_probe(struct i2c_client *client,
 	max->desc.min_uV = MAX8973_MIN_VOLATGE;
 	max->desc.uV_step = MAX8973_VOLATGE_STEP;
 	max->desc.n_voltages = MAX8973_BUCK_N_VOLTAGE;
+	max->desc.ramp_reg = MAX8973_CONTROL1;
+	max->desc.ramp_mask = MAX8973_RAMP_MASK;
+	max->desc.ramp_delay_table = max8973_buck_ramp_table;
+	max->desc.n_ramp_values = ARRAY_SIZE(max8973_buck_ramp_table);
 
 	max->dvs_gpio = (pdata->dvs_gpio) ? pdata->dvs_gpio : -EINVAL;
 	max->enable_external_control = pdata->enable_ext_control;
 	max->curr_gpio_val = pdata->dvs_def_state;
 	max->curr_vout_reg = MAX8973_VOUT + pdata->dvs_def_state;
 	max->junction_temp_warning = pdata->junction_temp_warning;
-	max->sleep_vout_reg = MAX8973_VOUT;
-	max->enable_dvs_sleep_control = pdata->enable_dvs_sleep_control;
-	if (!pdata->dvs_def_state)
-		max->sleep_vout_reg = MAX8973_VOUT + 1;
 
 	max->lru_index[0] = max->curr_vout_reg;
 

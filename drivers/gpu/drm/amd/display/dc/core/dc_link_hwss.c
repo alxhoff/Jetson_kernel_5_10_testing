@@ -14,7 +14,9 @@
 #include "dpcd_defs.h"
 #include "dsc.h"
 #include "resource.h"
+#include "link_enc_cfg.h"
 #include "clk_mgr.h"
+#include "inc/link_dpcd.h"
 
 static uint8_t convert_to_count(uint8_t lttpr_repeater_count)
 {
@@ -46,36 +48,6 @@ static inline bool is_immediate_downstream(struct dc_link *link, uint32_t offset
 	return (convert_to_count(link->dpcd_caps.lttpr_caps.phy_repeater_cnt) == offset);
 }
 
-enum dc_status core_link_read_dpcd(
-	struct dc_link *link,
-	uint32_t address,
-	uint8_t *data,
-	uint32_t size)
-{
-	if (!link->aux_access_disabled &&
-			!dm_helpers_dp_read_dpcd(link->ctx,
-			link, address, data, size)) {
-		return DC_ERROR_UNEXPECTED;
-	}
-
-	return DC_OK;
-}
-
-enum dc_status core_link_write_dpcd(
-	struct dc_link *link,
-	uint32_t address,
-	const uint8_t *data,
-	uint32_t size)
-{
-	if (!link->aux_access_disabled &&
-			!dm_helpers_dp_write_dpcd(link->ctx,
-			link, address, data, size)) {
-		return DC_ERROR_UNEXPECTED;
-	}
-
-	return DC_OK;
-}
-
 void dp_receiver_power_ctrl(struct dc_link *link, bool on)
 {
 	uint8_t state;
@@ -89,13 +61,20 @@ void dp_receiver_power_ctrl(struct dc_link *link, bool on)
 			sizeof(state));
 }
 
+void dp_source_sequence_trace(struct dc_link *link, uint8_t dp_test_mode)
+{
+	if (link->dc->debug.enable_driver_sequence_debug)
+		core_link_write_dpcd(link, DP_SOURCE_SEQUENCE,
+					&dp_test_mode, sizeof(dp_test_mode));
+}
+
 void dp_enable_link_phy(
 	struct dc_link *link,
 	enum signal_type signal,
 	enum clock_source_id clock_source,
 	const struct dc_link_settings *link_settings)
 {
-	struct link_encoder *link_enc = link->link_enc;
+	struct link_encoder *link_enc;
 	struct dc  *dc = link->ctx->dc;
 	struct dmcu *dmcu = dc->res_pool->dmcu;
 
@@ -104,6 +83,13 @@ void dp_enable_link_phy(
 	struct clock_source *dp_cs =
 			link->dc->res_pool->dp_clock_source;
 	unsigned int i;
+
+	/* Link should always be assigned encoder when en-/disabling. */
+	if (link->is_dig_mapping_flexible && dc->res_pool->funcs->link_encs_assign)
+		link_enc = link_enc_cfg_get_link_enc_used_by_link(dc, link);
+	else
+		link_enc = link->link_enc;
+	ASSERT(link_enc);
 
 	if (link->connector_signal == SIGNAL_TYPE_EDP) {
 		link->dc->hwss.edp_power_control(link, true);
@@ -153,7 +139,15 @@ void dp_enable_link_phy(
 	if (dmcu != NULL && dmcu->funcs->unlock_phy)
 		dmcu->funcs->unlock_phy(dmcu);
 
+	dp_source_sequence_trace(link, DPCD_SOURCE_SEQ_AFTER_ENABLE_LINK_PHY);
 	dp_receiver_power_ctrl(link, true);
+}
+
+void edp_add_delay_for_T9(struct dc_link *link)
+{
+	if (link->local_sink &&
+			link->local_sink->edid_caps.panel_patch.extra_delay_backlight_off > 0)
+		udelay(link->local_sink->edid_caps.panel_patch.extra_delay_backlight_off * 1000);
 }
 
 bool edp_receiver_ready_T9(struct dc_link *link)
@@ -165,7 +159,7 @@ bool edp_receiver_ready_T9(struct dc_link *link)
 
 	result = core_link_read_dpcd(link, DP_EDP_DPCD_REV, &edpRev, sizeof(edpRev));
 
-     /* start from eDP version 1.2, SINK_STAUS indicate the sink is ready.*/
+    /* start from eDP version 1.2, SINK_STAUS indicate the sink is ready.*/
 	if (result == DC_OK && edpRev >= DP_EDP_12) {
 		do {
 			sinkstatus = 1;
@@ -177,10 +171,6 @@ bool edp_receiver_ready_T9(struct dc_link *link)
 			udelay(100); //MAx T9
 		} while (++tries < 50);
 	}
-
-	if (link->local_sink &&
-			link->local_sink->edid_caps.panel_patch.extra_delay_backlight_off > 0)
-		udelay(link->local_sink->edid_caps.panel_patch.extra_delay_backlight_off * 1000);
 
 	return result;
 }
@@ -224,6 +214,14 @@ void dp_disable_link_phy(struct dc_link *link, enum signal_type signal)
 {
 	struct dc  *dc = link->ctx->dc;
 	struct dmcu *dmcu = dc->res_pool->dmcu;
+	struct link_encoder *link_enc;
+
+	/* Link should always be assigned encoder when en-/disabling. */
+	if (link->is_dig_mapping_flexible && dc->res_pool->funcs->link_encs_assign)
+		link_enc = link_enc_cfg_get_link_enc_used_by_link(dc, link);
+	else
+		link_enc = link->link_enc;
+	ASSERT(link_enc);
 
 	if (!link->wa_flags.dp_keep_receiver_powered)
 		dp_receiver_power_ctrl(link, false);
@@ -231,17 +229,19 @@ void dp_disable_link_phy(struct dc_link *link, enum signal_type signal)
 	if (signal == SIGNAL_TYPE_EDP) {
 		if (link->dc->hwss.edp_backlight_control)
 			link->dc->hwss.edp_backlight_control(link, false);
-		link->link_enc->funcs->disable_output(link->link_enc, signal);
+		link_enc->funcs->disable_output(link_enc, signal);
 		link->dc->hwss.edp_power_control(link, false);
 	} else {
 		if (dmcu != NULL && dmcu->funcs->lock_phy)
 			dmcu->funcs->lock_phy(dmcu);
 
-		link->link_enc->funcs->disable_output(link->link_enc, signal);
+		link_enc->funcs->disable_output(link_enc, signal);
 
 		if (dmcu != NULL && dmcu->funcs->unlock_phy)
 			dmcu->funcs->unlock_phy(dmcu);
 	}
+
+	dp_source_sequence_trace(link, DPCD_SOURCE_SEQ_AFTER_DISABLE_LINK_PHY);
 
 	/* Clear current link setting.*/
 	memset(&link->cur_link_settings, 0,
@@ -299,7 +299,7 @@ void dp_set_hw_lane_settings(
 {
 	struct link_encoder *encoder = link->link_enc;
 
-	if (link->lttpr_non_transparent_mode && !is_immediate_downstream(link, offset))
+	if ((link->lttpr_mode == LTTPR_MODE_NON_TRANSPARENT) && !is_immediate_downstream(link, offset))
 		return;
 
 	/* call Encoder to set lane settings */
@@ -313,7 +313,16 @@ void dp_set_hw_test_pattern(
 	uint32_t custom_pattern_size)
 {
 	struct encoder_set_dp_phy_pattern_param pattern_param = {0};
-	struct link_encoder *encoder = link->link_enc;
+	struct link_encoder *encoder;
+
+	/* Access link encoder based on whether it is statically
+	 * or dynamically assigned to a link.
+	 */
+	if (link->is_dig_mapping_flexible &&
+			link->dc->res_pool->funcs->link_encs_assign)
+		encoder = link_enc_cfg_get_link_enc_used_by_link(link->ctx->dc, link);
+	else
+		encoder = link->link_enc;
 
 	pattern_param.dp_phy_pattern = test_pattern;
 	pattern_param.custom_pattern = custom_pattern;
@@ -321,6 +330,7 @@ void dp_set_hw_test_pattern(
 	pattern_param.dp_panel_mode = dp_get_panel_mode(link);
 
 	encoder->funcs->dp_set_phy_pattern(encoder, &pattern_param);
+	dp_source_sequence_trace(link, DPCD_SOURCE_SEQ_AFTER_SET_SOURCE_PATTERN);
 }
 
 void dp_retrain_link_dp_test(struct dc_link *link,
@@ -339,7 +349,7 @@ void dp_retrain_link_dp_test(struct dc_link *link,
 			pipes[i].stream->link == link) {
 			udelay(100);
 
-			pipes[i].stream_res.stream_enc->funcs->dp_blank(
+			pipes[i].stream_res.stream_enc->funcs->dp_blank(link,
 					pipes[i].stream_res.stream_enc);
 
 			/* disable any test pattern that might be active */
@@ -352,9 +362,10 @@ void dp_retrain_link_dp_test(struct dc_link *link,
 			if ((&pipes[i])->stream_res.audio && !link->dc->debug.az_endpoint_mute_only)
 				(&pipes[i])->stream_res.audio->funcs->az_disable((&pipes[i])->stream_res.audio);
 
-			link->link_enc->funcs->disable_output(
-					link->link_enc,
-					SIGNAL_TYPE_DISPLAY_PORT);
+			if (link->link_enc)
+				link->link_enc->funcs->disable_output(
+						link->link_enc,
+						SIGNAL_TYPE_DISPLAY_PORT);
 
 			/* Clear current link setting. */
 			memset(&link->cur_link_settings, 0,
@@ -365,7 +376,8 @@ void dp_retrain_link_dp_test(struct dc_link *link,
 					skip_video_pattern,
 					LINK_TRAINING_ATTEMPTS,
 					&pipes[i],
-					SIGNAL_TYPE_DISPLAY_PORT);
+					SIGNAL_TYPE_DISPLAY_PORT,
+					false);
 
 			link->dc->hwss.enable_stream(&pipes[i]);
 
@@ -412,7 +424,7 @@ static void dsc_optc_config_log(struct display_stream_compressor *dsc,
 	DC_LOG_DSC("\tslice_width %d", config->slice_width);
 }
 
-static bool dp_set_dsc_on_rx(struct pipe_ctx *pipe_ctx, bool enable)
+bool dp_set_dsc_on_rx(struct pipe_ctx *pipe_ctx, bool enable)
 {
 	struct dc *dc = pipe_ctx->stream->ctx->dc;
 	struct dc_stream_state *stream = pipe_ctx->stream;
@@ -522,7 +534,7 @@ bool dp_set_dsc_enable(struct pipe_ctx *pipe_ctx, bool enable)
 		goto out;
 
 	if (enable) {
-		if (dp_set_dsc_on_rx(pipe_ctx, true)) {
+		{
 			dp_set_dsc_on_stream(pipe_ctx, true);
 			result = true;
 		}

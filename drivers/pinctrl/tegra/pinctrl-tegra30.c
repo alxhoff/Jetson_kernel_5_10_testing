@@ -2010,12 +2010,9 @@ enum tegra_mux {
 	TEGRA_MUX_VI_ALT3,
 };
 
-#define FUNCTION(fname)					\
-	{						\
-		.name = #fname,				\
-	}
+#define FUNCTION(fname) #fname
 
-static struct tegra_function tegra30_functions[] = {
+static const char * const tegra30_functions[] = {
 	FUNCTION(blink),
 	FUNCTION(cec),
 	FUNCTION(clk_12m_out),
@@ -2133,7 +2130,6 @@ static struct tegra_function tegra30_functions[] = {
 		.lock_bit = 7,						\
 		.ioreset_bit = PINGROUP_BIT_##ior(8),			\
 		.rcv_sel_bit = -1,					\
-		.pad_bit = -1,						\
 		.drv_reg = -1,						\
 		.parked_bitmask = 0,					\
 	}
@@ -2155,7 +2151,6 @@ static struct tegra_function tegra30_functions[] = {
 		.rcv_sel_bit = -1,					\
 		.drv_reg = DRV_PINGROUP_REG(r),				\
 		.drv_bank = 0,						\
-		.pad_bit = -1,						\
 		.hsm_bit = hsm_b,					\
 		.schmitt_bit = schmitt_b,				\
 		.lpmd_bit = lpmd_b,					\

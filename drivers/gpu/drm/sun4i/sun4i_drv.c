@@ -13,6 +13,7 @@
 #include <linux/of_reserved_mem.h>
 #include <linux/platform_device.h>
 
+#include <drm/drm_aperture.h>
 #include <drm/drm_atomic_helper.h>
 #include <drm/drm_drv.h>
 #include <drm/drm_fb_cma_helper.h>
@@ -40,7 +41,7 @@ static int drm_sun4i_gem_dumb_create(struct drm_file *file_priv,
 
 DEFINE_DRM_GEM_CMA_FOPS(sun4i_drv_fops);
 
-static struct drm_driver sun4i_drv_driver = {
+static const struct drm_driver sun4i_drv_driver = {
 	.driver_features	= DRIVER_GEM | DRIVER_MODESET | DRIVER_ATOMIC,
 
 	/* Generic Operations */
@@ -71,7 +72,6 @@ static int sun4i_drv_bind(struct device *dev)
 		goto free_drm;
 	}
 
-	dev_set_drvdata(dev, drm);
 	drm->dev_private = drv;
 	INIT_LIST_HEAD(&drv->frontend_list);
 	INIT_LIST_HEAD(&drv->engine_list);
@@ -94,12 +94,12 @@ static int sun4i_drv_bind(struct device *dev)
 	/* drm_vblank_init calls kcalloc, which can fail */
 	ret = drm_vblank_init(drm, drm->mode_config.num_crtc);
 	if (ret)
-		goto cleanup_mode_config;
-
-	drm->irq_enabled = true;
+		goto unbind_all;
 
 	/* Remove early framebuffers (ie. simplefb) */
-	drm_fb_helper_remove_conflicting_framebuffers(NULL, "sun4i-drm-fb", false);
+	ret = drm_aperture_remove_framebuffers(false, &sun4i_drv_driver);
+	if (ret)
+		goto unbind_all;
 
 	sun4i_framebuffer_init(drm);
 
@@ -112,10 +112,14 @@ static int sun4i_drv_bind(struct device *dev)
 
 	drm_fbdev_generic_setup(drm, 32);
 
+	dev_set_drvdata(dev, drm);
+
 	return 0;
 
 finish_poll:
 	drm_kms_helper_poll_fini(drm);
+unbind_all:
+	component_unbind_all(dev, NULL);
 cleanup_mode_config:
 	drm_mode_config_cleanup(drm);
 	of_reserved_mem_device_release(dev);
@@ -128,6 +132,7 @@ static void sun4i_drv_unbind(struct device *dev)
 {
 	struct drm_device *drm = dev_get_drvdata(dev);
 
+	dev_set_drvdata(dev, NULL);
 	drm_dev_unregister(drm);
 	drm_kms_helper_poll_fini(drm);
 	drm_atomic_helper_shutdown(drm);
@@ -411,6 +416,11 @@ static int sun4i_drv_remove(struct platform_device *pdev)
 	return 0;
 }
 
+static void sun4i_drv_shutdown(struct platform_device *pdev)
+{
+	drm_atomic_helper_shutdown(platform_get_drvdata(pdev));
+}
+
 static const struct of_device_id sun4i_drv_of_table[] = {
 	{ .compatible = "allwinner,sun4i-a10-display-engine" },
 	{ .compatible = "allwinner,sun5i-a10s-display-engine" },
@@ -434,6 +444,7 @@ MODULE_DEVICE_TABLE(of, sun4i_drv_of_table);
 static struct platform_driver sun4i_drv_platform_driver = {
 	.probe		= sun4i_drv_probe,
 	.remove		= sun4i_drv_remove,
+	.shutdown	= sun4i_drv_shutdown,
 	.driver		= {
 		.name		= "sun4i-drm",
 		.of_match_table	= sun4i_drv_of_table,
