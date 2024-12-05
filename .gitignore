@@ -10,6 +10,10 @@
 #
 # Normal rules (sorted alphabetically)
 #
+
+arch/arm64/boot/Image
+scripts/recordmcount
+
 .*
 *.a
 *.asn1.[ch]
